@@ -1,0 +1,5 @@
+{
+  "name": "PushHands.Editor",
+  "references": ["PushHands.Core", "PushHands.Runtime", "Unity.InputSystem", "Unity.TextMeshPro", "Unity.ugui", "UnityEditor.TestRunner", "UnityEngine.TestRunner"],
+  "includePlatforms": ["Editor"]
+}

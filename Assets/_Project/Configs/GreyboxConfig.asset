@@ -1,0 +1,39 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 7a7f96aa3f7bf5c4aaf3ba200f5b5c33, type: 3}
+  m_Name: GreyboxConfig
+  m_EditorClassIdentifier: 
+  StepSeconds: 0.25
+  SupportHalfSize: {x: 0.19, y: 0.2}
+  Mass: 70
+  CenterHeight: 1
+  Gravity: 9.81
+  RecoveryStiffness: 24
+  RecoveryDamping: 5
+  MaxRecoveryAcceleration: 8
+  LeanRange: 0.13
+  EffortLean: 0.085
+  PlayerSpacing: 0.85
+  TorsoRadius: 0.19
+  Reach: 1
+  ContactHalfWidth: 0.32
+  ExtendSeconds: 0.32
+  RetractSeconds: 0.24
+  RecoverSeconds: 0.16
+  ForceRisePerSecond: 2.4
+  HandForce: 220
+  SharedForce: 280
+  YawLimit: 35
+  PitchLimit: 20
+  GamepadLookSpeed: 85
+  MouseSensitivity: 0.1
+  StepAnimationSeconds: 0.3

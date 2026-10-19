@@ -1,0 +1,6 @@
+{
+  "name": "PushHands.EditMode",
+  "references": ["PushHands.Core", "PushHands.Runtime", "Unity.InputSystem"],
+  "includePlatforms": ["Editor"],
+  "optionalUnityReferences": ["TestAssemblies"]
+}
