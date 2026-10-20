@@ -12,6 +12,7 @@ namespace PushHands.Tests
             config = ScriptableObject.CreateInstance<PrototypeConfig>();
             match = new MatchSimulation(config);
             match.Ready(); match.Start();
+            match.Step(default, default, 3);
         }
         [TearDown] public void Cleanup() { Object.DestroyImmediate(config); }
         private void Steps(int count, PlayerIntent a = default, PlayerIntent b = default)
@@ -19,6 +20,70 @@ namespace PushHands.Tests
 
         [Test] public void StandingRemainsStable()
         { Steps(1000); Assert.AreEqual(Vector2.zero, match.Fighters[0].Center); Assert.AreEqual(RoundResult.None, match.Result); }
+
+        [Test] public void StartRequiresThreeSecondsWithoutAdvancingCombat()
+        {
+            match.Reset(); match.Start();
+            var held = new PlayerIntent { LeftForce = 1, RightForce = 1, Lean = Vector2.one };
+            for (int i = 0; i < 149; i++) match.Step(held, held, 0.02f);
+            Assert.AreEqual("Countdown", match.Phase.ToString());
+            Assert.AreEqual(0, match.Tick);
+            Assert.AreEqual(Vector2.zero, match.Fighters[0].Center);
+            Assert.AreEqual(0, match.Fighters[0].Left.Extension);
+            match.Step(held, held, 0.02f);
+            Assert.AreEqual(RoundPhase.Fighting, match.Phase);
+            Assert.AreEqual(0, match.Tick, "倒计时结束所在模拟步仍不可施力。");
+            match.Step(held, default, 0.02f);
+            Assert.AreEqual(1, match.Tick);
+        }
+
+        [Test] public void InterruptedCountdownRestartsAndPreservesFighterState()
+        {
+            match.Fighters[0].Center = new Vector2(0.04f, 0.03f);
+            match.Fighters[0].Velocity = new Vector2(0.02f, 0.01f);
+            match.Freeze(); match.Start(); match.Step(default, default, 1.5f);
+            match.Freeze();
+            int tick = match.Tick;
+            match.Step(default, default, 5);
+            Assert.AreEqual(RoundPhase.Frozen, match.Phase);
+            Assert.AreEqual(new Vector2(0.04f, 0.03f), match.Fighters[0].Center);
+            Assert.AreEqual(new Vector2(0.02f, 0.01f), match.Fighters[0].Velocity);
+            match.Start(); match.Step(default, default, 2.99f);
+            Assert.AreEqual("Countdown", match.Phase.ToString());
+            match.Step(default, default, 0.01f);
+            Assert.AreEqual(RoundPhase.Fighting, match.Phase);
+            Assert.AreEqual(tick, match.Tick);
+        }
+
+        [Test] public void RepeatedStartCannotSkipOrRestartCountdown()
+        {
+            match.Reset(); match.Start(); match.Step(default, default, 1);
+            match.Start(); match.Step(default, default, 1);
+            Assert.AreEqual("Countdown", match.Phase.ToString());
+            match.Start(); match.Step(default, default, 1);
+            Assert.AreEqual(RoundPhase.Fighting, match.Phase);
+            Assert.AreEqual(0, match.Tick);
+        }
+
+        [Test] public void CountdownShowsThreeTwoOneAtOneSecondIntervals()
+        {
+            match.Reset(); match.Start(); Assert.AreEqual(3, match.CountdownNumber);
+            Steps(49); Assert.AreEqual(3, match.CountdownNumber);
+            Steps(1); Assert.AreEqual(2, match.CountdownNumber);
+            Steps(50); Assert.AreEqual(1, match.CountdownNumber);
+            Steps(50); Assert.AreEqual(0, match.CountdownNumber);
+            Assert.AreEqual(RoundPhase.Fighting, match.Phase);
+        }
+
+        [Test] public void ResetAndWaitingCannotAccidentallyKeepCountdownRunning()
+        {
+            match.Reset(); match.Start(); match.Step(default, default, 1);
+            match.Reset(); match.Step(default, default, 5);
+            Assert.AreEqual(RoundPhase.Ready, match.Phase);
+            match.WaitForPlayers(); match.Start(); match.Step(default, default, 5);
+            Assert.AreEqual(RoundPhase.Waiting, match.Phase);
+            Assert.AreEqual(0, match.Tick);
+        }
 
         [Test] public void BriefExcursionCanRecover()
         {
@@ -105,6 +170,7 @@ namespace PushHands.Tests
             Steps(300, new PlayerIntent { LeftForce = 1 });
             var original = match.Result;
             match.Reset(); match.Start();
+            match.Step(default, default, 3);
             Steps(300, default, new PlayerIntent { LeftForce = 1 });
             Assert.AreNotEqual(RoundResult.None, original);
             Assert.AreEqual(original == RoundResult.PlayerOne ? RoundResult.PlayerTwo : RoundResult.PlayerOne, match.Result);
@@ -113,6 +179,7 @@ namespace PushHands.Tests
         [Test] public void DisplayFrameGroupingDoesNotChangeFixedStepResult()
         {
             var other = new MatchSimulation(config); other.Ready(); other.Start();
+            other.Step(default, default, 3);
             var intent = new PlayerIntent { LeftForce = 1, RightForce = 0.5f };
             for (int frame = 0; frame < 150; frame++)
             {

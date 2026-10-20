@@ -33,18 +33,23 @@ namespace PushHands.Editor
             File.Delete(Inbox);
             try
             {
-                if (command == "editmode-red" || command == "editmode-green" || command == "playmode")
+                if (command == "editmode-red" || command == "editmode-green" || command == "playmode" || command == "physical-tests")
                 {
                     SessionState.SetString("PushHands.TestJob", command);
                     api = ScriptableObject.CreateInstance<TestRunnerApi>();
                     api.RegisterCallbacks(new Results(command));
-                    api.Execute(new ExecutionSettings(new Filter { testMode = command == "playmode" ? TestMode.PlayMode : TestMode.EditMode,
-                        assemblyNames = new[] { command == "playmode" ? "PushHands.PlayMode" : "PushHands.EditMode" } }));
+                    bool playMode = command == "playmode" || command == "physical-tests";
+                    api.Execute(new ExecutionSettings(new Filter { testMode = playMode ? TestMode.PlayMode : TestMode.EditMode,
+                        assemblyNames = new[] { playMode ? "PushHands.PlayMode" : "PushHands.EditMode" },
+                        testNames = command == "physical-tests" ? new[] { "PushHands.Tests.PhysicalTests" } : null }));
                 }
                 else if (command == "install") PackageSetup.InstallInEditor();
                 else if (command == "configure") { PackageSetup.Configure(); Complete(command, "已保存输入设置"); }
                 else if (command == "baseline") Complete(command, "Unity=" + Application.unityVersion + "; 编译完成，无项目脚本编译错误");
                 else if (command == "refresh") { AssetDatabase.Refresh(); Complete(command, "资源已刷新"); }
+                else if (command == "physical-generate") { PhysicalBuilder.Generate(); Complete(command, "独立物理场景已生成"); }
+                else if (command == "physical-build") { PhysicalBuilder.BuildWindows(); Complete(command, "物理原型 Windows 包已构建"); }
+                else if (command == "physical-handoff") { PhysicalBuilder.Handoff(); Complete(command, "已打开物理试玩场景并捕获检查视图"); }
                 else if (command == "resources")
                     Type.GetType("PushHands.Editor.GreyboxBuilder, PushHands.Editor").GetMethod("ImportTextResources").Invoke(null, null);
                 else if (command == "generate" || command == "build")
@@ -74,6 +79,8 @@ namespace PushHands.Editor
             public void TestFinished(ITestResultAdaptor result) { }
             public void RunFinished(ITestResultAdaptor result)
             {
+                // TestRunner 的回调可跨域重载保留；旧任务不能把新任务的结果写进另一份报告。
+                if (SessionState.GetString("PushHands.TestJob", "") != name) return;
                 SessionState.EraseString("PushHands.TestJob");
                 File.WriteAllText("Artifacts/Verification/" + name + ".xml", result.ToXml().OuterXml);
                 Complete(name, $"通过={result.PassCount} 失败={result.FailCount} 跳过={result.SkipCount}");

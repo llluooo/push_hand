@@ -81,5 +81,28 @@ namespace PushHands.Tests
                 if (previousMouse != null && previousMouse.added) previousMouse.MakeCurrent();
             }
         }
+
+        [Test] public void KeyboardCannotArmWhileMovementKeyIsHeld()
+        {
+            var previousKeyboard = Keyboard.current; var previousMouse = Mouse.current;
+            var keyboard = InputSystem.AddDevice<Keyboard>(); var mouse = InputSystem.AddDevice<Mouse>();
+            try
+            {
+                keyboard.MakeCurrent(); mouse.MakeCurrent(); roster.ToggleKeyboardDebug();
+                InputSystem.QueueStateEvent(keyboard, new KeyboardState(Key.W));
+                InputSystem.Update();
+                Assert.AreEqual(default(PlayerIntent), roster.Read(0));
+                Assert.AreEqual(default(PlayerIntent), roster.Read(0), "持续按住 WASD 时不得解除保护。");
+                InputSystem.QueueStateEvent(keyboard, new KeyboardState()); InputSystem.Update(); roster.Read(0);
+                InputSystem.QueueStateEvent(keyboard, new KeyboardState(Key.W)); InputSystem.Update();
+                Assert.AreEqual(Vector2.up, roster.Read(0).Lean);
+            }
+            finally
+            {
+                InputSystem.RemoveDevice(keyboard); InputSystem.RemoveDevice(mouse);
+                if (previousKeyboard != null && previousKeyboard.added) previousKeyboard.MakeCurrent();
+                if (previousMouse != null && previousMouse.added) previousMouse.MakeCurrent();
+            }
+        }
     }
 }

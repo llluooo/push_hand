@@ -33,7 +33,12 @@ namespace PushHands
             {
                 if (slot != 0 || Keyboard.current == null || Mouse.current == null) return default;
                 var k = Keyboard.current; var m = Mouse.current;
-                if (!armed[0]) { armed[0] = !m.leftButton.isPressed && !m.rightButton.isPressed; return default; }
+                if (!armed[0])
+                {
+                    armed[0] = !m.leftButton.isPressed && !m.rightButton.isPressed
+                        && !k.wKey.isPressed && !k.aKey.isPressed && !k.sKey.isPressed && !k.dKey.isPressed;
+                    return default;
+                }
                 return new PlayerIntent { LeftForce = m.leftButton.isPressed ? 1 : 0, RightForce = m.rightButton.isPressed ? 1 : 0,
                     Lean = Vector2.ClampMagnitude(new Vector2((k.dKey.isPressed ? 1 : 0) - (k.aKey.isPressed ? 1 : 0),
                         (k.wKey.isPressed ? 1 : 0) - (k.sKey.isPressed ? 1 : 0)), 1), Look = m.delta.ReadValue() };

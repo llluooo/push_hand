@@ -1,0 +1,414 @@
+using System.Collections;
+using NUnit.Framework;
+using PushHands.Physical;
+using UnityEngine;
+using UnityEngine.SceneManagement;
+using UnityEngine.TestTools;
+
+namespace PushHands.Tests
+{
+    public sealed class PhysicalTests
+    {
+        private Scene scene;
+        private PhysicalConfig config;
+        private PhysicalFighter a, b;
+        private static void Diagnostic(PhysicalFighter fighter, string name, int tick)
+        {
+            System.IO.Directory.CreateDirectory("Artifacts/Verification");
+            string path = "Artifacts/Verification/physical-" + name + "-dynamics.txt";
+            if (tick == 0) System.IO.File.WriteAllText(path, "");
+            var state = fighter.CaptureBalance();
+            string text = $"tick={tick} center={state.Center} velocity={state.Velocity} feet={state.FootDisplacement:F3}\n";
+            foreach (var bone in fighter.Bones)
+                text += $"{bone.Name}: pos={bone.Body.position:F3} rot={bone.Body.rotation.eulerAngles:F1} target={bone.Joint.targetRotation.eulerAngles:F1}\n";
+            System.IO.File.AppendAllText(path, text);
+        }
+        [SetUp] public void Setup()
+        {
+            scene = SceneManager.CreateScene("PhysicalTest", new CreateSceneParameters(LocalPhysicsMode.Physics3D));
+            config = ScriptableObject.CreateInstance<PhysicalConfig>();
+            var floor = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            SceneManager.MoveGameObjectToScene(floor, scene);
+            floor.transform.position = new Vector3(0, -0.06f, 0); floor.transform.localScale = new Vector3(8, 0.1f, 8);
+            a = PhysicalFighter.Create(0, config, null); b = PhysicalFighter.Create(1, config, null);
+            SceneManager.MoveGameObjectToScene(a.gameObject, scene); SceneManager.MoveGameObjectToScene(b.gameObject, scene);
+            PhysicalFighter.ConfigureInteraction(a, b);
+        }
+        [UnityTearDown] public IEnumerator Cleanup()
+        { Object.DestroyImmediate(config); yield return SceneManager.UnloadSceneAsync(scene); }
+
+        [Test] public void BodyHasTwentyMassSegmentsAndFiniteJointDrives()
+        {
+            Assert.AreEqual(20, a.Bones.Length);
+            float mass = 0;
+            foreach (var bone in a.Bones)
+            {
+                mass += bone.Body.mass;
+                Assert.IsNotNull(bone.Joint);
+                Assert.Greater(bone.Joint.slerpDrive.maximumForce, 0);
+                Assert.Less(bone.Joint.slerpDrive.maximumForce, 1000);
+            }
+            Assert.AreEqual(70, mass, 0.01f);
+        }
+        [Test] public void RecordedIntentsAndBodySamplesSurviveJsonRoundTrip()
+        {
+            var frame = new PhysicalFrame { first = new PlayerIntent { LeftForce = 0.7f, Lean = new Vector2(0.2f, -0.3f) },
+                one = new BalanceSample { Center = new Vector2(0.1f, 0.2f), Finite = true } };
+            string json = JsonUtility.ToJson(frame);
+            StringAssert.Contains("\"first\"", json); StringAssert.Contains("\"one\"", json);
+            var restored = JsonUtility.FromJson<PhysicalFrame>(json);
+            Assert.AreEqual(0.7f, restored.first.LeftForce); Assert.AreEqual(frame.one.Center, restored.one.Center);
+            Assert.IsTrue(restored.one.Finite);
+        }
+        [Test] public void MalformedOrNonfinitePolicyCannotProduceCorrection()
+        {
+            var policy = new LinearBalancePolicy(); policy.weights[0] = float.NaN;
+            Assert.IsFalse(policy.Valid); Assert.AreEqual(Vector2.zero, policy.Evaluate(new float[10]));
+            policy.weights[0] = 1; var observation = new float[10]; observation[0] = float.PositiveInfinity;
+            Assert.AreEqual(Vector2.zero, policy.Evaluate(observation));
+        }
+        [Test] public void MalformedOrUnvalidatedPolicyJsonFallsBackToBaseline()
+        {
+            Assert.IsNull(LinearBalancePolicy.LoadValidated("{"));
+            Assert.IsNull(LinearBalancePolicy.LoadValidated(JsonUtility.ToJson(new LinearBalancePolicy())));
+            var policy = new LinearBalancePolicy { validated = true };
+            Assert.IsNotNull(LinearBalancePolicy.LoadValidated(JsonUtility.ToJson(policy)));
+        }
+        [Test] public void BothPushingThenOneWithdrawingSeparatesActualContact()
+        {
+            a.SetFrozen(false); b.SetFrozen(false); bool sawContact = false;
+            var push = new PlayerIntent { LeftForce = 0.8f, RightForce = 0.8f };
+            for (int i = 0; i < 150; i++)
+            {
+                a.Drive(push, false, false, b, 0.01f); b.Drive(push, false, false, a, 0.01f);
+                scene.GetPhysicsScene().Simulate(0.01f); sawContact |= a.ContactCount > 0;
+                if (i % 30 == 0) Diagnostic(a, "contact", i);
+            }
+            Assert.IsTrue(sawContact, "双方推掌必须能形成真实合法接触");
+            for (int i = 0; i < 30; i++)
+            {
+                a.Drive(push, false, false, b, 0.01f); b.Drive(default, true, false, a, 0.01f);
+                scene.GetPhysicsScene().Simulate(0.01f);
+            }
+            Assert.AreEqual(0, b.ContactCount, "收力后撤应能分离接触");
+        }
+        [Test] public void OnlyHandsAndForearmsCollideAcrossFighters()
+        {
+            foreach (var x in a.Bones) foreach (var y in b.Bones)
+                Assert.AreEqual(!ContactRules.IsLegal(x.Region, y.Region), Physics.GetIgnoreCollision(x.Collider, y.Collider));
+        }
+        [Test] public void FreezeAndResumePreserveMomentum()
+        {
+            a.SetFrozen(false); a.Pelvis.velocity = new Vector3(0.2f, 0, 0.5f);
+            a.SetFrozen(true); Assert.IsTrue(a.Pelvis.isKinematic);
+            a.SetFrozen(false); Assert.AreEqual(new Vector3(0.2f, 0, 0.5f), a.Pelvis.velocity);
+        }
+        [Test] public void ResetClearsMomentumAndTechnique()
+        {
+            a.SetFrozen(false); a.Pelvis.velocity = Vector3.one;
+            a.Technique.Tick(true, false, 0.02f); a.ResetPose(); a.SetFrozen(false);
+            Assert.AreEqual(Vector3.zero, a.Pelvis.velocity);
+            Assert.AreEqual(Technique.None, a.Technique.Active);
+        }
+        [Test] public void WithdrawRequestsShorterReachThanPush()
+        {
+            a.SetFrozen(false); b.SetFrozen(false);
+            a.Drive(new PlayerIntent { LeftForce = 1, RightForce = 1 }, false, false, b, 0.1f);
+            float forward = a.transform.InverseTransformPoint(a.PalmTargets[0]).z;
+            a.Drive(default, true, false, b, 0.1f);
+            Assert.Less(a.transform.InverseTransformPoint(a.PalmTargets[0]).z, forward);
+        }
+        [Test] public void IdleStanceSurvivesFiveSecondsOfActualPhysics()
+        {
+            a.SetFrozen(false); b.SetFrozen(false);
+            for (int i = 0; i < 250; i++)
+            {
+                a.Drive(default, false, false, b, 0.02f); b.Drive(default, false, false, a, 0.02f);
+                scene.GetPhysicsScene().Simulate(0.02f);
+                if (i % 50 == 0) Diagnostic(a, "idle", i);
+            }
+            Assert.Greater(a.Pelvis.position.y, 0.70f);
+            Assert.Less(a.CaptureBalance().Center.magnitude, 0.25f);
+        }
+        [Test] public void FrozenBodiesDoNotDriftDuringCountdown()
+        {
+            Vector3 position = a.Pelvis.position;
+            a.SetFrozen(true);
+            for (int i = 0; i < 150; i++) scene.GetPhysicsScene().Simulate(0.02f);
+            Assert.AreEqual(position, a.Pelvis.position);
+        }
+        [Test] public void RaisedGuardStaysVisibleWithoutIdleContact()
+        {
+            a.SetFrozen(false); b.SetFrozen(false);
+            float lowestPalm = 10; int contacts = 0;
+            for (int i = 0; i < 600; i++)
+            {
+                a.Drive(default, false, false, b, 0.01f); b.Drive(default, false, false, a, 0.01f);
+                scene.GetPhysicsScene().Simulate(0.01f);
+                contacts += a.ContactCount;
+                if (i < 100) continue;
+                lowestPalm = Mathf.Min(lowestPalm, a.Palm(0).position.y, a.Palm(1).position.y);
+            }
+            Assert.AreEqual(0, contacts, "准备架势不得自动接触对手");
+            Assert.Greater(lowestPalm, 1.34f, "手掌应维持在胸肩之间，而不是下垂到腹部");
+            a.RenderView(0);
+            for (int side = 0; side < 2; side++)
+            {
+                Vector3 view = a.ViewCamera.WorldToViewportPoint(a.Palm(side).position);
+                Assert.Greater(view.z, 0); Assert.That(view.x, Is.InRange(0.06f, 0.94f));
+                Assert.That(view.y, Is.InRange(0.12f, 0.70f), "准备手位必须完整出现在第一人称视口内");
+            }
+        }
+        [Test] public void IdleBodySettlesInsteadOfContinuouslyOscillating()
+        {
+            a.SetFrozen(false); b.SetFrozen(false);
+            Vector3 min = Vector3.one * 100, max = Vector3.one * -100;
+            float angularSquared = 0, sampledMass = 0;
+            Vector3 palmMin = Vector3.one * 100, palmMax = Vector3.one * -100;
+            float[] boneSquared = new float[a.Bones.Length];
+            for (int i = 0; i < 1000; i++)
+            {
+                a.Drive(default, false, false, b, 0.01f); b.Drive(default, false, false, a, 0.01f);
+                scene.GetPhysicsScene().Simulate(0.01f);
+                if (i < 300) continue;
+                foreach (var bone in a.Bones)
+                    if (bone.Name == "Head")
+                    { min = Vector3.Min(min, bone.Body.position); max = Vector3.Max(max, bone.Body.position); }
+                palmMin = Vector3.Min(palmMin, a.Palm(0).position); palmMax = Vector3.Max(palmMax, a.Palm(0).position);
+                for (int j = 0; j < a.Bones.Length; j++)
+                { float value = a.Bones[j].Body.angularVelocity.sqrMagnitude; angularSquared += value * a.Bones[j].Body.mass;
+                    sampledMass += a.Bones[j].Body.mass; boneSquared[j] += value; }
+            }
+            float speed = Mathf.Sqrt(angularSquared / sampledMass);
+            TestContext.WriteLine($"静止头部峰峰值={(max - min):F4}，手掌峰峰值={(palmMax - palmMin):F4}，质量加权角速度RMS={speed:F4}");
+            for (int j = 0; j < a.Bones.Length; j++) TestContext.WriteLine($"{a.Bones[j].Name}: {Mathf.Sqrt(boneSquared[j] / 700):F4}");
+            Assert.Less((max - min).magnitude, 0.025f, "稳定后头部不应持续大幅晃动");
+            Assert.Less((palmMax - palmMin).magnitude, 0.015f, "手掌也应稳定，不能只检查头部");
+            Assert.Less(speed, 0.06f, "真实关节应稳定，不能只用镜头平滑掩盖抖动");
+        }
+        [Test] public void StartingWithoutInputDoesNotAutomaticallyRetractArms()
+        {
+            Vector3 start = a.Palm(0).position;
+            a.SetFrozen(false);
+            for (int i = 0; i < 10; i++) a.Drive(default, false, false, b, 0.01f);
+            Assert.Less(Vector3.Distance(start, a.PalmTargets[0]), 0.02f, "初始架势与运行时准备架势应一致");
+        }
+        [Test] public void ModerateImpulseRecoversButLargeImpulseCanStillCauseStep()
+        {
+            a.SetFrozen(false); b.SetFrozen(false);
+            for (int i = 0; i < 200; i++) SimulatePair(default, default);
+            a.Pelvis.AddForce(new Vector3(4, 0, 4), ForceMode.Impulse);
+            bool stepped = false;
+            for (int i = 0; i < 400; i++) { SimulatePair(default, default); stepped |= a.AssessStep(0.01f); }
+            Assert.IsFalse(stepped, "适度扰动后应能恢复");
+            Assert.Less(a.CaptureBalance().Velocity.magnitude, 0.04f);
+            a.Pelvis.AddForce(Vector3.forward * 250, ForceMode.Impulse);
+            for (int i = 0; i < 50; i++) { SimulatePair(default, default); stepped |= a.AssessStep(0.01f); }
+            Assert.IsTrue(stepped, "稳定辅助必须有限，强扰动仍能失衡迈步");
+        }
+        [Test] public void SustainedPushDoesNotChaseHandsUpToTheFace()
+        {
+            a.SetFrozen(false); b.SetFrozen(false);
+            for (int i = 0; i < 200; i++) SimulatePair(default, default);
+            float highest = 0, narrowest = 1;
+            var push = new PlayerIntent { LeftForce = 0.8f, RightForce = 0.8f };
+            for (int i = 0; i < 200; i++)
+            {
+                SimulatePair(push, push);
+                for (int side = 0; side < 2; side++)
+                {
+                    highest = Mathf.Max(highest, a.Palm(side).position.y);
+                    narrowest = Mathf.Min(narrowest, Mathf.Abs(a.transform.InverseTransformPoint(a.Palm(side).position).x));
+                }
+                if (a.AssessStep(0.01f) || b.AssessStep(0.01f)) break;
+            }
+            TestContext.WriteLine($"持续推掌最高={highest:F3}，最小手间半宽={narrowest:F3}");
+            Assert.Less(highest, 1.55f, "双方手位不能因相互追踪一路抬到面部");
+            Assert.Greater(narrowest, 0.09f, "左右手保持各自的操作通道");
+        }
+        [TestCase(0, 0f)] [TestCase(1, 0f)] [TestCase(0, 0.8f)] [TestCase(1, 0.8f)]
+        public void LegalPushMovesIdleBodyAndForwardCommitmentCanForceStep(int attackerIndex, float leanAmount)
+        {
+            var friction = new PhysicMaterial("ActualSceneFriction") { staticFriction = 0.9f, dynamicFriction = 0.75f,
+                frictionCombine = PhysicMaterialCombine.Average };
+            try
+            {
+                foreach (var root in scene.GetRootGameObjects())
+                    foreach (var collider in root.GetComponentsInChildren<Collider>()) collider.sharedMaterial = friction;
+                a.SetFrozen(false); b.SetFrozen(false);
+                var attacker = attackerIndex == 0 ? a : b; var defender = attackerIndex == 0 ? b : a;
+                for (int i = 0; i < 300; i++) SimulatePair(default, default);
+                var attack = new PlayerIntent { LeftForce = 1, RightForce = 1, Lean = new Vector2(0, leanAmount) };
+                int contacts = 0; float maximumShift = 0, nearestGap = 10; bool attackerStep = false, defenderStep = false;
+                float impulse = 0, activePressure = 0; int ticks = 0;
+                Vector2 start = defender.CaptureBalance().Center;
+                for (int i = 0; i < 600; i++)
+                {
+                    SimulatePair(attackerIndex == 0 ? attack : default, attackerIndex == 0 ? default : attack);
+                    contacts += attacker.ContactCount > 0 ? 1 : 0;
+                    Vector3 transferred = Vector3.zero;
+                    foreach (var bone in defender.Bones) transferred += bone.Body.GetComponent<PhysicalContact>().Impulse;
+                    impulse += Mathf.Abs(Vector3.Dot(transferred, attacker.transform.forward)); ticks++;
+                    activePressure += Vector3.Dot(attacker.ActivePushForce, attacker.transform.forward);
+                    maximumShift = Mathf.Max(maximumShift, Vector2.Distance(start, defender.CaptureBalance().Center));
+                    nearestGap = Mathf.Min(nearestGap, Vector3.Distance(attacker.Palm(0).position, defender.Palm(1).position));
+                    attackerStep |= attacker.AssessStep(0.01f); defenderStep |= defender.AssessStep(0.01f);
+                    if (defenderStep || attackerStep) break;
+                }
+                TestContext.WriteLine($"攻击方={attackerIndex} 接触帧={contacts} 防守重心最大位移={maximumShift:F4} 最近掌心距离={nearestGap:F4} 被动接触力={impulse / (ticks * 0.01f):F1}N 主动压力={activePressure / ticks:F1}N 攻击迈步={attackerStep} 防守迈步={defenderStep}");
+                TestContext.WriteLine($"进攻重心={attacker.CaptureBalance().Center:F3} 趋势={attacker.CaptureBalance().Predicted:F3} 防守重心={defender.CaptureBalance().Center:F3} 趋势={defender.CaptureBalance().Predicted:F3}");
+                Assert.Greater(contacts, 10, "单方发力必须能触及静止对手的手／前臂");
+                Assert.Greater(maximumShift, 0.04f, "接触载荷应让身体产生可见位移，再触发保护步");
+                Assert.IsFalse(attackerStep, "合理发力不应固定由攻击者先失衡");
+                // 仅手臂顶压也要推得动身体；保证逼出保护步的情形是配合主动重心前压。
+                if (leanAmount <= 0) return;
+                Assert.IsTrue(defenderStep, "合理的持续发力与前倾应能逼迫完全不操作的对手出步");
+                float stepDistance = 0;
+                for (int i = 0; i < 60; i++)
+                {
+                    a.PresentStep(0.01f); b.PresentStep(0.01f); scene.GetPhysicsScene().Simulate(0.01f);
+                    stepDistance = Mathf.Max(stepDistance, defender.CaptureBalance().FootDisplacement);
+                }
+                TestContext.WriteLine($"保护步实际足部位移={stepDistance:F3}m");
+                Assert.Greater(stepDistance, 0.10f, "判负必须伴随真实保护步，不能站着不动只改结果");
+            }
+            finally { Object.DestroyImmediate(friction); }
+        }
+        [Test] public void SingleHandPushAndReleaseRemainReadableInSplitView()
+        {
+            a.SetFrozen(false); b.SetFrozen(false);
+            var firstMaterial = new Material(Shader.Find("Standard")) { color = new Color(0.18f, 0.48f, 0.72f) };
+            var secondMaterial = new Material(Shader.Find("Standard")) { color = new Color(0.86f, 0.42f, 0.20f) };
+            var lampObject = new GameObject("PreviewLight"); SceneManager.MoveGameObjectToScene(lampObject, scene);
+            lampObject.layer = 18; lampObject.transform.rotation = Quaternion.Euler(45, -25, 0);
+            var lamp = lampObject.AddComponent<Light>(); lamp.type = LightType.Directional; lamp.intensity = 1.4f;
+            try
+            {
+                foreach (var fighter in new[] { a, b })
+                {
+                    foreach (var bone in fighter.Bones)
+                    {
+                        bone.Body.GetComponent<Renderer>().sharedMaterial = fighter == a ? firstMaterial : secondMaterial;
+                        bone.Body.gameObject.layer = bone.Region == ContactRegion.Head ? 16 + fighter.PlayerIndex : 14 + fighter.PlayerIndex;
+                    }
+                    fighter.ViewCamera.cullingMask = (1 << 14) | (1 << 15) | (1 << (17 - fighter.PlayerIndex)) | (1 << 18);
+                }
+                foreach (var root in scene.GetRootGameObjects()) if (root.name == "Cube") root.layer = 18;
+                for (int i = 0; i < 200; i++) SimulatePair(default, default);
+                SaveSplitView("guard");
+                for (int i = 0; i < 80; i++) SimulatePair(new PlayerIntent { LeftForce = 0.8f }, new PlayerIntent { RightForce = 0.8f });
+                Assert.Greater(a.Effort[0], 0.7f); Assert.AreEqual(0, a.Effort[1]);
+                Assert.Greater(a.transform.InverseTransformPoint(a.PalmTargets[0]).z,
+                    a.transform.InverseTransformPoint(a.PalmTargets[1]).z + 0.04f);
+                SaveSplitView("left-push");
+                for (int i = 0; i < 30; i++) SimulatePair(default, new PlayerIntent { RightForce = 0.8f });
+                Assert.AreEqual(0, a.Effort[0]);
+                Assert.That(a.transform.InverseTransformPoint(a.PalmTargets[0]).z, Is.InRange(config.GuardReach - 0.03f, config.GuardReach + 0.03f));
+                SaveSplitView("release");
+            }
+            finally { Object.DestroyImmediate(firstMaterial); Object.DestroyImmediate(secondMaterial); }
+        }
+        [TestCase(0)] [TestCase(1)] public void ActiveWeightShiftDelaysFailureComparedWithIdleGuard(int attackerIndex)
+        {
+            var friction = new PhysicMaterial("ActualDefenseFriction") { staticFriction = 0.9f, dynamicFriction = 0.75f,
+                frictionCombine = PhysicMaterialCombine.Average };
+            try
+            {
+                foreach (var root in scene.GetRootGameObjects())
+                    foreach (var collider in root.GetComponentsInChildren<Collider>()) collider.sharedMaterial = friction;
+                float idle = MeasureDefenseTime(attackerIndex, 0, out bool idleFailed);
+                float active = MeasureDefenseTime(attackerIndex, 0.7f, out _);
+                TestContext.WriteLine($"同样进攻：待机={idle:F2}s，主动调整={active:F2}s");
+                Assert.IsTrue(idleFailed);
+                Assert.Greater(active, idle + 0.4f, "主动调整重心应争取更长反应时间，而非与待机一样");
+                Assert.Greater(active, 1, "不能通过让进攻者立即自败来假装防守有效");
+            }
+            finally { Object.DestroyImmediate(friction); }
+        }
+        private float MeasureDefenseTime(int attackerIndex, float braceAmount, out bool defenderFailed)
+        {
+            a.ResetPose(); b.ResetPose(); a.SetFrozen(false); b.SetFrozen(false); Physics.SyncTransforms();
+            for (int i = 0; i < 300; i++) SimulatePair(default, default);
+            var attack = new PlayerIntent { LeftForce = 1, RightForce = 1, Lean = Vector2.up * 0.8f };
+            var brace = new PlayerIntent { Lean = Vector2.up * braceAmount };
+            for (int i = 0; i < 100 && braceAmount > 0; i++) SimulatePair(attackerIndex == 0 ? default : brace, attackerIndex == 0 ? brace : default);
+            var attacker = attackerIndex == 0 ? a : b; var defender = attackerIndex == 0 ? b : a;
+            defenderFailed = false;
+            for (int i = 0; i < 500; i++)
+            {
+                SimulatePair(attackerIndex == 0 ? attack : brace, attackerIndex == 0 ? brace : attack);
+                defenderFailed = defender.AssessStep(0.01f); bool attackerFailed = attacker.AssessStep(0.01f);
+                if (defenderFailed || attackerFailed) return (i + 1) * 0.01f;
+            }
+            return 5;
+        }
+        [Test] public void PushCannotApplyActivePressureWithoutLegalContact()
+        {
+            b.SetFrozen(true); a.SetFrozen(false);
+            b.transform.position += Vector3.right * 3; Physics.SyncTransforms();
+            var push = new PlayerIntent { LeftForce = 1, RightForce = 1 };
+            Vector3 position = b.Pelvis.position;
+            for (int i = 0; i < 100; i++)
+            {
+                a.Drive(push, false, false, b, 0.01f); scene.GetPhysicsScene().Simulate(0.01f);
+                Assert.AreEqual(Vector3.zero, a.ActivePushForce, "没有目标和合法接触时不能凭空推人");
+            }
+            Assert.AreEqual(position, b.Pelvis.position);
+        }
+        [TestCase(0)] [TestCase(1)] public void EarlyWithdrawCanAvoidTheInitialCommittedPush(int attackerIndex)
+        {
+            a.SetFrozen(false); b.SetFrozen(false);
+            for (int i = 0; i < 300; i++) SimulatePair(default, default);
+            var attacker = attackerIndex == 0 ? a : b; var defender = attackerIndex == 0 ? b : a;
+            var attack = new PlayerIntent { LeftForce = 1, RightForce = 1, Lean = Vector2.up * 0.8f };
+            bool defenderStep = false, attackerStep = false; int unloaded = 0;
+            for (int i = 0; i < 50; i++)
+            {
+                attacker.Drive(attack, false, false, defender, 0.01f);
+                defender.Drive(default, i == 8, false, attacker, 0.01f);
+                scene.GetPhysicsScene().Simulate(0.01f);
+                if (i >= 15 && attacker.ActivePushForce.sqrMagnitude < 0.001f) unloaded++;
+                attackerStep |= attacker.AssessStep(0.01f); defenderStep |= defender.AssessStep(0.01f);
+                if (attackerStep || defenderStep) break;
+            }
+            TestContext.WriteLine($"提前撤手：防守迈步={defenderStep}，进攻迈步={attackerStep}，卸载帧={unloaded}");
+            Assert.IsFalse(defenderStep, "正确时机撤手应能避开原本打破待机架势的首轮进攻");
+            Assert.Greater(unloaded, 10, "撤手要实际撤去接触压力，而非只播放动作");
+        }
+        private void SimulatePair(PlayerIntent first, PlayerIntent second)
+        {
+            a.Drive(first, false, false, b, 0.01f); b.Drive(second, false, false, a, 0.01f);
+            scene.GetPhysicsScene().Simulate(0.01f);
+        }
+        private void SaveSplitView(string phase)
+        {
+            var target = new RenderTexture(1600, 900, 24);
+            var previousActive = RenderTexture.active;
+            Texture2D image = null;
+            try
+            {
+                foreach (var fighter in new[] { a, b })
+                {
+                    fighter.RenderView(0); fighter.ViewCamera.targetTexture = target;
+                    fighter.ViewCamera.Render(); fighter.ViewCamera.targetTexture = null;
+                }
+                RenderTexture.active = target; image = new Texture2D(1600, 900, TextureFormat.RGB24, false);
+                image.ReadPixels(new Rect(0, 0, 1600, 900), 0, 0); image.Apply();
+                System.IO.Directory.CreateDirectory("Artifacts/Verification");
+                System.IO.File.WriteAllBytes("Artifacts/Verification/stance-" + phase + "-split.png", image.EncodeToPNG());
+            }
+            finally
+            {
+                a.ViewCamera.targetTexture = b.ViewCamera.targetTexture = null; RenderTexture.active = previousActive;
+                if (image != null) Object.DestroyImmediate(image);
+                target.Release(); Object.DestroyImmediate(target);
+            }
+        }
+        [Test] public void SameStepFailureResolvesOnceAsDraw()
+        {
+            var rules = new PhysicalRound(); rules.Ready(); rules.Start(); rules.Advance(3.01f);
+            rules.Resolve(true, true); rules.Resolve(true, false);
+            Assert.AreEqual(RoundResult.Draw, rules.Result); Assert.AreEqual(1, rules.Resolutions);
+        }
+    }
+}

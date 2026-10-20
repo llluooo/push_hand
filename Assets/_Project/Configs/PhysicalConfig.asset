@@ -1,0 +1,70 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 151e68d8bab046c7b1e5650b195a2e0a, type: 3}
+  m_Name: PhysicalConfig
+  m_EditorClassIdentifier: 
+  FixedStep: 0.01
+  Spacing: 0.98
+  SupportHalfSize: {x: 0.23, y: 0.23}
+  StepDelay: 0.2
+  FootStepDistance: 0.1
+  BodySpring: 750
+  BodyDamper: 75
+  BodyTorque: 220
+  ArmSpring: 650
+  ArmDamper: 50
+  ArmTorque: 75
+  FootSpring: 1600
+  FootDamper: 100
+  FootForce: 220
+  FootTorque: 100
+  MaximumStandForce: 1150
+  MaximumBalanceForce: 160
+  PassiveBalanceForce: 35
+  PassiveRootTorque: 25
+  ActiveRootTorque: 100
+  LeanTravel: 0.14
+  ActiveBalancePush: 110
+  ProtectiveStepDistance: 0.22
+  StepLiftHeight: 0.09
+  StepSeconds: 0.42
+  MaximumStepForce: 350
+  StandingStiffness: 80
+  StandingDamping: 18
+  LeanDegrees: 11
+  EffortDegrees: 8
+  RecoveryGain: 48
+  RecoveryDamping: 10
+  AimSpeed: 0.9
+  HandAdvance: 0.045
+  WithdrawDistance: 0.16
+  MaximumHandReach: 0.59
+  SharedEffort: 1.45
+  PushForcePerHand: 55
+  ForwardCommitmentGain: 0.5
+  ContactBodyShare: 0.8
+  GuardHeight: 1.445
+  GuardReach: 0.4
+  GuardWidth: 0.16
+  PoseResponse: 12
+  JointDampingScale: 1.6
+  CenterDeadZone: 0.006
+  VelocityDeadZone: 0.015
+  GravityCompensation: 0.9
+  HandPlaneSpring: 300
+  HandPlaneDamper: 25
+  MaximumHandPlaneForce: 55
+  YawLimit: 35
+  PitchLimit: 20
+  PadLookSpeed: 85
+  MouseSensitivity: 0.1
+  ViewDownDegrees: 8

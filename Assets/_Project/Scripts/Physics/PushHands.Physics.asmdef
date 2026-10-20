@@ -1,0 +1,4 @@
+{
+  "name": "PushHands.Physics",
+  "references": ["PushHands.Core", "PushHands.Runtime", "Unity.InputSystem", "Unity.TextMeshPro", "Unity.ugui"]
+}

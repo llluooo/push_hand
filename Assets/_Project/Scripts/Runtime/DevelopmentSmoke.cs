@@ -20,6 +20,8 @@ namespace PushHands
         private int stage;
         private float stageStarted;
         private int renderedFrames;
+        private int countdownObserved;
+        private bool countdownMoved;
 
         private void Start()
         {
@@ -50,6 +52,14 @@ namespace PushHands
                 Debug.Log($"自动试玩 {elapsed:F1}s：阶段={controller.Simulation.Phase}，设备={controller.Roster.Count}，已添加={first.added}/{second.added}，启用={first.enabled}/{second.enabled}，菜单={first.startButton.ReadValue()}，后台={Application.isFocused}，输入更新={InputSystem.settings.updateMode}");
             }
             var a = new GamepadState(); var b = new GamepadState();
+            if (controller.Simulation.Phase == RoundPhase.Countdown)
+            {
+                int number = controller.Simulation.CountdownNumber;
+                if (number >= 1 && number <= 3) countdownObserved |= 1 << (number - 1);
+                countdownMoved |= controller.Simulation.Tick != 0
+                    || controller.Simulation.Fighters[0].Left.Extension > 0
+                    || controller.Simulation.Fighters[0].Center != Vector2.zero;
+            }
             if (stage == 0)
             {
                 a = a.WithButton(GamepadButton.Start); b = b.WithButton(GamepadButton.Start);
@@ -74,8 +84,9 @@ namespace PushHands
             if ((stage == 4 && Time.unscaledTime - stageStarted > 0.8f) || elapsed > 12)
             {
                 bool pass = controller.Simulation.Result != RoundResult.None && controller.Simulation.ResolutionCount == 1
-                    && controller.Roster.Complete && controller.Simulation.Tick > 0 && errors == 0;
-                File.WriteAllText(Path.Combine(output, "smoke.txt"), $"通过={pass}\n结果={controller.Simulation.Result}\n模拟步={controller.Simulation.Tick}\n裁决次数={controller.Simulation.ResolutionCount}\n运行错误={errors}\n目标帧率={Application.targetFrameRate}\n实测平均帧率={renderedFrames / Mathf.Max(elapsed, 0.01f):F1}");
+                    && controller.Roster.Complete && controller.Simulation.Tick > 0 && errors == 0
+                    && countdownObserved == 7 && !countdownMoved;
+                File.WriteAllText(Path.Combine(output, "smoke.txt"), $"通过={pass}\n结果={controller.Simulation.Result}\n模拟步={controller.Simulation.Tick}\n裁决次数={controller.Simulation.ResolutionCount}\n运行错误={errors}\n准备数字完整={countdownObserved == 7}\n准备期间发生对抗={countdownMoved}\n目标帧率={Application.targetFrameRate}\n实测平均帧率={renderedFrames / Mathf.Max(elapsed, 0.01f):F1}");
                 Application.Quit(pass ? 0 : 1); enabled = false;
             }
         }

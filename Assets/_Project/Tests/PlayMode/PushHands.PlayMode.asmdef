@@ -1,5 +1,5 @@
 {
   "name": "PushHands.PlayMode",
-  "references": ["PushHands.Core", "PushHands.Runtime", "Unity.InputSystem", "Unity.TextMeshPro"],
+  "references": ["PushHands.Core", "PushHands.Runtime", "PushHands.Physics", "Unity.InputSystem", "Unity.TextMeshPro"],
   "optionalUnityReferences": ["TestAssemblies"]
 }

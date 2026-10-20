@@ -2,6 +2,7 @@ using UnityEngine;
 
 namespace PushHands
 {
+    [System.Serializable]
     public struct PlayerIntent
     {
         public float LeftForce, RightForce;
@@ -9,7 +10,7 @@ namespace PushHands
     }
 
     public enum HandPhase { Rest, Extending, Contact, Retracting, Recovering }
-    public enum RoundPhase { Waiting, Ready, Fighting, Frozen, Finished }
+    public enum RoundPhase { Waiting, Ready, Fighting, Frozen, Finished, Countdown }
     public enum RoundResult { None, PlayerOne, PlayerTwo, Draw }
 
     public sealed class HandState
@@ -37,22 +38,43 @@ namespace PushHands
         public RoundResult Result { get; private set; }
         public int ResolutionCount { get; private set; }
         public int Tick { get; private set; }
+        private double countdownRemaining;
+        public int CountdownNumber => Phase == RoundPhase.Countdown
+            ? Mathf.CeilToInt((float)System.Math.Max(0, countdownRemaining - 0.000001)) : 0;
         private readonly PrototypeConfig config;
 
         public MatchSimulation(PrototypeConfig config) { this.config = config; }
-        public void Ready() { Phase = RoundPhase.Ready; }
+        public void Ready() { if (Phase == RoundPhase.Waiting) Phase = RoundPhase.Ready; }
         public void WaitForPlayers() { if (Phase == RoundPhase.Ready) Phase = RoundPhase.Waiting; }
-        public void Start() { if (Phase == RoundPhase.Ready || Phase == RoundPhase.Frozen) Phase = RoundPhase.Fighting; }
-        public void Freeze() { if (Phase == RoundPhase.Fighting) Phase = RoundPhase.Frozen; }
+        public void Start()
+        {
+            if (Phase != RoundPhase.Ready && Phase != RoundPhase.Frozen) return;
+            countdownRemaining = 3;
+            Phase = RoundPhase.Countdown;
+        }
+        public void Freeze()
+        {
+            if (Phase != RoundPhase.Fighting && Phase != RoundPhase.Countdown) return;
+            countdownRemaining = 0;
+            Phase = RoundPhase.Frozen;
+        }
         public void Reset()
         {
             Fighters[0] = new FighterState(); Fighters[1] = new FighterState();
-            Result = RoundResult.None; ResolutionCount = 0; Tick = 0; Phase = RoundPhase.Ready;
+            Result = RoundResult.None; ResolutionCount = 0; Tick = 0; countdownRemaining = 0; Phase = RoundPhase.Ready;
         }
 
         public void Step(PlayerIntent first, PlayerIntent second, float dt)
         {
             if (dt <= 0 || Phase == RoundPhase.Frozen) return;
+            if (Phase == RoundPhase.Countdown)
+            {
+                countdownRemaining -= dt;
+                if (countdownRemaining <= 0.000001)
+                { countdownRemaining = 0; Phase = RoundPhase.Fighting; }
+                // 倒计时结束这一模拟步不消费预先输入，也不补算对抗时间。
+                return;
+            }
             if (Phase == RoundPhase.Finished)
             {
                 foreach (var f in Fighters)

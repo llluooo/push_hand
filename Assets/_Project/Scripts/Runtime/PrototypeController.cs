@@ -16,6 +16,8 @@ namespace PushHands
         private bool focused = true;
         private bool smokeMode;
         private string freezeReason;
+        private readonly TMP_Text[] countdownHud = new TMP_Text[2];
+        private float startAnnouncementRemaining;
 
         private void Awake()
         {
@@ -23,6 +25,7 @@ namespace PushHands
             Simulation = new MatchSimulation(Config);
             Roster = new DeviceRoster();
             Roster.DeviceLost += () => Freeze("手柄已断开：重连后按菜单键继续");
+            CreateCountdownHud();
             smokeMode = Debug.isDebugBuild && System.Array.IndexOf(System.Environment.GetCommandLineArgs(), "-greybox-smoke") >= 0;
             if (smokeMode)
                 gameObject.AddComponent<DevelopmentSmoke>();
@@ -41,7 +44,8 @@ namespace PushHands
             var keyboard = Keyboard.current;
             if (keyboard != null && keyboard.f3Key.wasPressedThisFrame) DebugVisible = !DebugVisible;
             if (keyboard != null && keyboard.escapeKey.wasPressedThisFrame) Freeze("已暂停：按菜单键继续");
-            if (keyboard != null && keyboard.f1Key.wasPressedThisFrame && Simulation.Phase != RoundPhase.Fighting)
+            if (keyboard != null && keyboard.f1Key.wasPressedThisFrame
+                && Simulation.Phase != RoundPhase.Fighting && Simulation.Phase != RoundPhase.Countdown)
             {
                 Roster.ToggleKeyboardDebug(); ResetRound();
                 if (Roster.KeyboardDebug) Simulation.Ready();
@@ -55,7 +59,8 @@ namespace PushHands
                 if (Simulation.Phase == RoundPhase.Finished) ResetRound();
                 if (Simulation.Phase == RoundPhase.Ready || Simulation.Phase == RoundPhase.Frozen)
                 { ClearInput(); Simulation.Start(); }
-                else if (Simulation.Phase == RoundPhase.Fighting) Freeze("已暂停：按菜单键继续");
+                else if (Simulation.Phase == RoundPhase.Fighting || Simulation.Phase == RoundPhase.Countdown)
+                    Freeze("已暂停：按菜单键继续");
             }
             for (int i = 0; i < 2; i++)
             {
@@ -66,21 +71,32 @@ namespace PushHands
             Cursor.lockState = Roster.KeyboardDebug && Simulation.Phase == RoundPhase.Fighting ? CursorLockMode.Locked : CursorLockMode.None;
             Cursor.visible = Cursor.lockState != CursorLockMode.Locked;
             UpdateHud();
+            startAnnouncementRemaining = Mathf.Max(0, startAnnouncementRemaining - Time.unscaledDeltaTime);
         }
 
-        private void FixedUpdate() { if (focused) Simulation.Step(input[0], input[1], Time.fixedDeltaTime); }
+        private void FixedUpdate()
+        {
+            if (!focused) return;
+            bool wasCountdown = Simulation.Phase == RoundPhase.Countdown;
+            Simulation.Step(input[0], input[1], Time.fixedDeltaTime);
+            if (wasCountdown && Simulation.Phase == RoundPhase.Fighting)
+            {
+                ClearInput();
+                startAnnouncementRemaining = 0.6f;
+            }
+        }
         private void LateUpdate()
         {
             for (int i = 0; i < 2; i++) Views[i].Render(Simulation.Fighters[i], Simulation.Fighters[1 - i], Views[1 - i], Config);
         }
         public void Freeze(string reason)
         {
-            Simulation.Freeze(); ClearInput(); freezeReason = reason;
+            Simulation.Freeze(); ClearInput(); startAnnouncementRemaining = 0; freezeReason = reason;
             Cursor.lockState = CursorLockMode.None; Cursor.visible = true;
         }
         public void ResetRound()
         {
-            Simulation.Reset(); ClearInput();
+            Simulation.Reset(); ClearInput(); startAnnouncementRemaining = 0;
             if (!Roster.Complete) Simulation.WaitForPlayers();
             foreach (var view in Views) view.ResetLook();
         }
@@ -92,6 +108,7 @@ namespace PushHands
             {
                 case RoundPhase.Waiting: status = $"等待双手柄加入（{Roster.Count}/2）\n分别按菜单键加入"; break;
                 case RoundPhase.Ready: status = "已就绪 · 按菜单键开始"; break;
+                case RoundPhase.Countdown: status = "准备中 · 请等待"; break;
                 case RoundPhase.Fighting: status = "对抗中 · 先迈步者负"; break;
                 case RoundPhase.Frozen: status = freezeReason; break;
                 default:
@@ -108,10 +125,33 @@ namespace PushHands
                 string device = Roster.KeyboardDebug ? (i == 0 ? "键鼠" : "测试靶") : Roster.Device(i) != null ? "手柄" + (i + 1) : "未加入";
                 string controls = Roster.KeyboardDebug ? "鼠标左右键：双手  WASD：重心\n鼠标：观察  Enter：开始/暂停/重置" : "左右扳机：双手  左摇杆：重心\n右摇杆：观察  菜单键：开始/暂停/重置";
                 Hud[i].text = $"玩家{(i == 0 ? "一" : "二")} · {device}\n{status}\n\n{controls}\nF1：切换开发验证  F3：调试视图";
+                countdownHud[i].text = Simulation.Phase == RoundPhase.Countdown ? Simulation.CountdownNumber.ToString()
+                    : Simulation.Phase == RoundPhase.Fighting && startAnnouncementRemaining > 0 ? "开始" : "";
                 var panel = (RectTransform)Hud[i].transform.parent;
                 panel.anchorMin = new Vector2(panel.anchorMin.x, DebugVisible ? 0.53f : 0.69f);
                 if (DebugVisible)
                     Hud[i].text += $"\n\n重心 {f.Center.x:F2}, {f.Center.y:F2} 米\n趋势 {f.PredictedCenter.x:F2}, {f.PredictedCenter.y:F2}\n失衡 {f.UnstableSeconds:F2} / {Config.StepSeconds:F2} 秒\n左手 {HandName(f.Left.Phase)}  右手 {HandName(f.Right.Phase)}";
+            }
+        }
+        private void CreateCountdownHud()
+        {
+            // 运行时在既有 Canvas 上创建提示，现有场景和重新生成的灰盒均自动适用。
+            for (int i = 0; i < 2; i++)
+            {
+                var label = new GameObject("RoundCountdown", typeof(RectTransform), typeof(TextMeshProUGUI));
+                label.transform.SetParent(Hud[i].canvas.transform, false);
+                var rect = label.GetComponent<RectTransform>();
+                rect.anchorMin = new Vector2(i * 0.5f, 0.36f);
+                rect.anchorMax = new Vector2((i + 1) * 0.5f, 0.64f);
+                rect.offsetMin = rect.offsetMax = Vector2.zero;
+                var text = label.GetComponent<TextMeshProUGUI>();
+                text.font = Hud[i].font;
+                text.fontSize = 110;
+                text.alignment = TextAlignmentOptions.Center;
+                text.color = new Color(1, 0.9f, 0.55f);
+                text.raycastTarget = false;
+                text.text = "";
+                countdownHud[i] = text;
             }
         }
         private static string HandName(HandPhase phase)
