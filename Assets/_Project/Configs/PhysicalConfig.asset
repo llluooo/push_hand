@@ -68,3 +68,12 @@ MonoBehaviour:
   PadLookSpeed: 85
   MouseSensitivity: 0.1
   ViewDownDegrees: 8
+  ResultDisplaySeconds: 3
+  StepRecoverySeconds: 0.9
+  FeedbackVolume: 0.6
+  HapticStrength: 0.65
+  FeedbackForceScale: 110
+  FeedbackResponse: 14
+  FeedbackCooldown: 0.18
+  CameraKickMeters: 0.012
+  CameraKickDegrees: 0.65

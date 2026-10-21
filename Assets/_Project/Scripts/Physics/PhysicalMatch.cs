@@ -11,6 +11,7 @@ namespace PushHands.Physical
         public PhysicalFighter[] Fighters;
         public TMP_Text[] Hud, CountdownHud;
         public PhysicalRecorder Recorder;
+        public PhysicalFeedback Feedback { get; private set; }
         public TextAsset ValidatedPolicy;
         public PhysicalRound Round { get; private set; } = new PhysicalRound();
         public PhysicalInput Input { get; private set; }
@@ -18,7 +19,15 @@ namespace PushHands.Physical
         public bool DebugVisible;
         public bool DebugOpponentPush { get; private set; }
         public float FightSeconds { get; private set; }
+        public float ResultSeconds { get; private set; }
+        public bool ResultPaused { get; private set; }
+        public bool CanRestart => Round.Phase == RoundPhase.Finished && resultStarted && !ResultPaused
+            && ResultSeconds >= Mathf.Max(0, Config.ResultDisplaySeconds)
+            && (!Fighters[0].Stepping || Fighters[0].StepPresentationComplete)
+            && (!Fighters[1].Stepping || Fighters[1].StepPresentationComplete);
+        private bool resultStarted;
         private bool focused = true;
+        private bool smokeMode;
         private bool initialized;
         private string freezeReason = "已暂停：按菜单键继续";
         private float startAnnouncement;
@@ -34,6 +43,9 @@ namespace PushHands.Physical
             PhysicalFighter.ConfigureInteraction(Fighters[0], Fighters[1]);
             foreach (var fighter in Fighters) fighter.ResetPose();
             Input = new PhysicalInput(); Input.Roster.DeviceLost += () => Freeze("手柄断开：补位后按菜单键继续");
+            Feedback = GetComponent<PhysicalFeedback>();
+            if (Feedback == null) Feedback = gameObject.AddComponent<PhysicalFeedback>();
+            Feedback.Initialize(this);
             Time.fixedDeltaTime = Config.FixedStep; initialized = true;
             if (Recorder == null) Recorder = GetComponent<PhysicalRecorder>();
             if (ValidatedPolicy != null)
@@ -43,13 +55,21 @@ namespace PushHands.Physical
                 { policy = null; Debug.LogWarning("学习模型未通过版本／验证检查，保留基础控制器。"); }
             }
             var args = System.Environment.GetCommandLineArgs();
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            smokeMode = Debug.isDebugBuild && System.Array.IndexOf(args, "-physical-feedback-smoke") >= 0;
+            if (smokeMode) { focused = true; gameObject.AddComponent<PhysicalFeedbackSmoke>(); }
+#endif
             if (System.Array.IndexOf(args, "-physical-experiment") >= 0 && GetComponent<PhysicalExperiment>() == null)
                 gameObject.AddComponent<PhysicalExperiment>();
         }
-        private void OnDestroy() { Input?.Dispose(); Cursor.lockState = CursorLockMode.None; Cursor.visible = true; }
+        private void OnDisable()
+        {
+            if (initialized) Freeze("已暂停：按菜单键继续");
+        }
+        private void OnDestroy() { Feedback?.Clear(); Input?.Dispose(); Cursor.lockState = CursorLockMode.None; Cursor.visible = true; }
         private void OnApplicationFocus(bool value)
         {
-            if (ExternalSimulation) return;
+            if (ExternalSimulation || smokeMode) return;
             focused = value; if (!value && initialized) Freeze("失去焦点：按菜单键继续");
         }
         private void Update()
@@ -61,7 +81,8 @@ namespace PushHands.Physical
                 if (keyboard.escapeKey.wasPressedThisFrame) Freeze("已暂停：按菜单键继续");
                 if (keyboard.f3Key.wasPressedThisFrame) DebugVisible = !DebugVisible;
                 if (keyboard.f2Key.wasPressedThisFrame && Input.Roster.KeyboardDebug) DebugOpponentPush = !DebugOpponentPush;
-                if (keyboard.f1Key.wasPressedThisFrame && Round.Phase != RoundPhase.Fighting && Round.Phase != RoundPhase.Countdown)
+                if (keyboard.f1Key.wasPressedThisFrame && Round.Phase != RoundPhase.Fighting && Round.Phase != RoundPhase.Countdown
+                    && (Round.Phase != RoundPhase.Finished || CanRestart))
                 { Input.Roster.ToggleKeyboardDebug(); ResetRound(); }
                 if (keyboard.f4Key.wasPressedThisFrame && Recorder != null)
                 {
@@ -73,19 +94,29 @@ namespace PushHands.Physical
             if (Input.Roster.Complete) Round.Ready();
             if (!joined && Input.Roster.Complete && Input.Roster.StartPressed())
             {
-                if (Round.Phase == RoundPhase.Finished) ResetRound();
-                if (Round.Phase == RoundPhase.Ready || Round.Phase == RoundPhase.Frozen)
+                if (Round.Phase == RoundPhase.Finished)
+                {
+                    if (ResultPaused)
+                    {
+                        ResultPaused = false;
+                        foreach (var fighter in Fighters)
+                            if (!fighter.StepPresentationComplete) fighter.SetFrozen(false);
+                    }
+                    else if (CanRestart) { ResetRound(); Input.Disarm(); Round.Start(); }
+                }
+                else if (Round.Phase == RoundPhase.Ready || Round.Phase == RoundPhase.Frozen)
                 { Input.Disarm(); Round.Start(); }
                 else Freeze("已暂停：按菜单键继续");
             }
-            if (Round.Phase == RoundPhase.Fighting)
+            if (Round.Phase == RoundPhase.Fighting || (Round.Phase == RoundPhase.Finished && !ResultPaused))
                 for (int i = 0; i < 2; i++)
                 {
-                    Input.Sample(i);
+                    if (Round.Phase == RoundPhase.Fighting) Input.Sample(i);
                     float scale = Input.Roster.KeyboardDebug ? Config.MouseSensitivity : Config.PadLookSpeed * Time.unscaledDeltaTime;
-                    Fighters[i].Observe(Input.Intents[i].Look * scale);
+                    Fighters[i].Observe(Input.ReadLook(i) * scale);
                 }
-            Cursor.lockState = Input.Roster.KeyboardDebug && Round.Phase == RoundPhase.Fighting ? CursorLockMode.Locked : CursorLockMode.None;
+            Cursor.lockState = Input.Roster.KeyboardDebug && (Round.Phase == RoundPhase.Fighting
+                || (Round.Phase == RoundPhase.Finished && !ResultPaused)) ? CursorLockMode.Locked : CursorLockMode.None;
             Cursor.visible = Cursor.lockState != CursorLockMode.Locked;
         }
         private void FixedUpdate()
@@ -109,8 +140,14 @@ namespace PushHands.Physical
                 return;
             }
             if (Round.Phase == RoundPhase.Finished)
-            { foreach (var fighter in Fighters) fighter.PresentStep(dt); return; }
+            {
+                BeginResult(); if (ResultPaused) return;
+                ResultSeconds += dt;
+                foreach (var fighter in Fighters) fighter.PresentStep(dt);
+                Feedback.Sample(dt, false); return;
+            }
             if (Round.Phase != RoundPhase.Fighting) return;
+            Feedback.Sample(dt, true);
             // 单人开发靶显式维持轻推，便于测试接触；正常双人松键仍完整收手。
             if (Input.Roster.KeyboardDebug && !ExternalSimulation)
                 b = DebugOpponentPush ? new PlayerIntent { LeftForce = 0.6f, RightForce = 0.6f } : default;
@@ -120,7 +157,7 @@ namespace PushHands.Physical
             bool one = Fighters[0].AssessStep(dt), two = Fighters[1].AssessStep(dt);
             Round.Resolve(one, two);
             if (Round.Phase == RoundPhase.Finished)
-            { Recorder?.Capture(this, a, b); return; }
+            { BeginResult(); Recorder?.Capture(this, a, b); return; }
             if (policy != null && !ExternalSimulation)
             {
                 Fighters[0].LearningCorrection = policy.Evaluate(LinearBalancePolicy.Observe(Fighters[0], a));
@@ -133,19 +170,31 @@ namespace PushHands.Physical
         {
             if (!initialized) return;
             // 已结束的保护步也应能冻结；不改变已经裁决的结果。
+            if (Round.Phase == RoundPhase.Finished) ResultPaused = true;
+            Feedback?.Clear();
             Round.Freeze(); freezeReason = reason; Input.Disarm(); startAnnouncement = 0;
-            foreach (var fighter in Fighters) fighter.SetFrozen(true);
+            foreach (var fighter in Fighters) if (fighter != null) fighter.SetFrozen(true);
         }
         public void ResetRound()
         {
             if (!initialized) return;
+            Feedback?.Clear();
             foreach (var fighter in Fighters) fighter.ResetPose();
             Round.Reset(Input.Roster.Complete); Input.Disarm(); FightSeconds = 0; startAnnouncement = 0;
+            ResultSeconds = 0; ResultPaused = resultStarted = false;
             Recorder?.MarkReset(this);
+        }
+        private void BeginResult()
+        {
+            if (resultStarted) return;
+            resultStarted = true; Input.Disarm();
+            foreach (var fighter in Fighters) fighter.EndControl();
         }
         private void LateUpdate()
         {
             if (!initialized) return;
+            if (focused && !ResultPaused && (Round.Phase == RoundPhase.Fighting || Round.Phase == RoundPhase.Finished))
+                Feedback.Render(Time.unscaledDeltaTime);
             foreach (var fighter in Fighters) fighter.RenderView(Time.unscaledDeltaTime);
             startAnnouncement = Mathf.Max(0, startAnnouncement - Time.unscaledDeltaTime);
             if (Hud == null || CountdownHud == null) return;
@@ -157,12 +206,18 @@ namespace PushHands.Physical
                 case RoundPhase.Countdown: status = "准备中 · 请松开操控"; break;
                 case RoundPhase.Frozen: status = freezeReason; break;
                 case RoundPhase.Fighting: status = "对抗中 · 先迈步者负"; break;
-                default: status = Round.Result == RoundResult.Draw ? "双方迈步 · 平局" : Round.Result == RoundResult.PlayerOne ? "玩家一获胜" : "玩家二获胜"; status += " · 菜单键重开"; break;
+                default: status = Round.Result == RoundResult.Draw ? "双方迈步 · 平局" : Round.Result == RoundResult.PlayerOne ? "玩家一获胜" : "玩家二获胜";
+                    status += ResultPaused ? " · " + freezeReason : CanRestart ? " · 菜单键重开" : " · 保护步展示中"; break;
             }
             if (Input.Roster.KeyboardDebug) status = "键鼠验证 · 对手" + (DebugOpponentPush ? "自动轻推" : "准备") + "\nF2：自动轻推\n" + status.Replace("菜单键", "Enter");
             for (int i = 0; i < 2; i++)
             {
                 bool keyboard = Input.Roster.KeyboardDebug;
+                if (Round.Phase == RoundPhase.Finished)
+                {
+                    Hud[i].text = status.Replace("菜单键", keyboard ? "Enter" : "菜单键");
+                    CountdownHud[i].text = ""; continue;
+                }
                 var balance = Fighters[i].CaptureBalance();
                 Hud[i].text = $"玩家{(i == 0 ? "一" : "二")}\n{status}\n"
                     + (keyboard ? "鼠标左右键：双手  WASD：重心\nQ：收力后撤  E：假推\n" : "左右扳机：双手  左摇杆：重心\nLB：收力后撤  RB：假推\n")

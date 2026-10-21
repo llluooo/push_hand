@@ -14,6 +14,8 @@ namespace PushHands.Physical
         public Rigidbody Pelvis => Bones[0].Body;
         public bool Frozen { get; private set; }
         public bool Stepping { get; private set; }
+        public bool StepLanded { get; private set; }
+        public bool StepPresentationComplete { get; private set; }
         public Vector2 LearningCorrection { get; set; }
         public float[] Effort { get; } = new float[2];
         public Vector3 ActivePushForce { get; private set; }
@@ -28,9 +30,12 @@ namespace PushHands.Physical
         private Vector2 filteredSupportShift, supportMin, supportMax;
         private PhysicalFighter opponent;
         private bool cached;
-        private float unstable, stepTime;
+        private float unstable, stepTime, landingTime;
         private int stepSide = -1;
         private Vector3 stepFrom, stepTo;
+        private Vector3 feedbackPosition, feedbackAngles, lastFeedbackWorld;
+        private PhysicalContact[] palmContacts, forearmContacts;
+        private readonly float[] handPushForce = new float[2];
         private readonly Dictionary<string, PhysicalBone> named = new Dictionary<string, PhysicalBone>();
         public int ContactCount
         {
@@ -154,6 +159,8 @@ namespace PushHands.Physical
                 supportChains[i] = chain.ToArray();
             }
             palms = Pair("Palm"); forearms = Pair("Forearm"); upperArms = Pair("UpperArm"); clavicles = Pair("Clavicle");
+            palmContacts = new[] { palms[0].Body.GetComponent<PhysicalContact>(), palms[1].Body.GetComponent<PhysicalContact>() };
+            forearmContacts = new[] { forearms[0].Body.GetComponent<PhysicalContact>(), forearms[1].Body.GetComponent<PhysicalContact>() };
             thighs = Pair("Thigh"); shins = Pair("Shin"); feet = Pair("Foot"); cached = true;
             supportMin = Vector2.one * 100; supportMax = Vector2.one * -100;
             foreach (var foot in feet)
@@ -176,6 +183,7 @@ namespace PushHands.Physical
             if (Frozen || dt <= 0 || float.IsNaN(dt) || float.IsInfinity(dt)) return;
             Cache(); Technique.Tick(withdraw, feint, dt);
             ActivePushForce = Vector3.zero;
+            handPushForce[0] = handPushForce[1] = 0;
             activePressureMoment = Vector3.zero; opponent = other;
             foreach (var bone in Bones) bone.Body.GetComponent<PhysicalContact>().ResetImpulse();
             float retreat = Technique.WithdrawWeight;
@@ -273,6 +281,7 @@ namespace PushHands.Physical
             // 肌肉经手臂传来的接触反作用由上身承担，避免把自己的手掌弹离接触点。
             named["UpperThorax"].Body.AddForceAtPosition(-force, point, ForceMode.Force);
             ActivePushForce += force;
+            handPushForce[side] = force.magnitude;
             activePressureMoment += Vector3.Cross(point, force);
         }
         private void SupportHandPlane(int side)
@@ -435,17 +444,50 @@ namespace PushHands.Physical
                 SetSegmentGoal(thighs[side], hip, knee); SetSegmentGoal(shins[side], knee, ankle);
                 SetGoal(feet[side], feet[side].StartRotation);
             }
-            SupportStance(CaptureBalance(), Vector2.zero, 0, stepSide); SupportPose();
+            SupportStance(CaptureBalance(), Vector2.zero, 0, StepLanded ? -1 : stepSide); SupportPose();
             var lifted = feet[stepSide].Body;
-            Vector3 liftForce = (target - lifted.position) * Config.FootSpring - lifted.velocity * Config.FootDamper + Vector3.up * 110;
-            lifted.AddForce(Vector3.ClampMagnitude(liftForce, Config.MaximumStepForce), ForceMode.Force);
-            if (stepTime >= Config.StepSeconds + 0.25f) SetFrozen(true);
+            if (!StepLanded)
+            {
+                Vector3 liftForce = (target - lifted.position) * Config.FootSpring - lifted.velocity * Config.FootDamper
+                    + Vector3.up * (progress < 1 ? 110 : 0);
+                lifted.AddForce(Vector3.ClampMagnitude(liftForce, Config.MaximumStepForce), ForceMode.Force);
+                Vector3 error = lifted.position - stepTo; error.y = 0;
+                if (progress >= 1 && error.magnitude < 0.06f && lifted.position.y <= stepFrom.y + 0.035f)
+                {
+                    StepLanded = true;
+                    landingTime = stepTime;
+                    var support = lifted.GetComponents<ConfigurableJoint>()[1];
+                    support.connectedAnchor = lifted.position;
+                    var drive = new JointDrive { positionSpring = Config.FootSpring, positionDamper = Config.FootDamper, maximumForce = Config.FootForce };
+                    support.xDrive = support.zDrive = drive;
+                    Vector3 travel = transform.InverseTransformDirection(lifted.position - stepFrom);
+                    restCenter += new Vector2(travel.x, travel.z) * 0.5f;
+                }
+            }
+            // 落脚后继续恢复身体，不能仅因原来的短计时结束就截断动作。
+            if (StepLanded && stepTime - landingTime >= Mathf.Max(0.3f, Config.StepRecoverySeconds))
+            { StepPresentationComplete = true; SetFrozen(true); }
         }
+        public void EndControl()
+        {
+            Effort[0] = Effort[1] = 0; Technique.Reset(); LearningCorrection = Vector2.zero;
+            controlLean = Vector2.zero; ActivePushForce = activePressureMoment = Vector3.zero; opponent = null;
+            handPushForce[0] = handPushForce[1] = 0;
+        }
+        public void ReadHandLoad(int side, float dt, out bool touching, out float force)
+        {
+            Cache(); var palm = palmContacts[side]; var arm = forearmContacts[side];
+            touching = palm.Count > 0 || arm.Count > 0;
+            force = touching ? Mathf.Max(handPushForce[side], (palm.Impulse + arm.Impulse).magnitude / Mathf.Max(0.001f, dt)) : 0;
+        }
+        public void SetFeedbackView(Vector3 position, Vector3 angles)
+        { feedbackPosition = position; feedbackAngles = angles; }
         public void SetFrozen(bool frozen)
         {
             if (Frozen == frozen) return;
             foreach (var bone in Bones)
             {
+                if (bone.Body == null) continue; // 场景退出时身体段可能先于对局控制器销毁。
                 if (frozen) { bone.SavedVelocity = bone.Body.velocity; bone.SavedAngularVelocity = bone.Body.angularVelocity; bone.Body.isKinematic = true; }
                 else { bone.Body.isKinematic = false; bone.Body.velocity = bone.SavedVelocity; bone.Body.angularVelocity = bone.SavedAngularVelocity; bone.Body.WakeUp(); }
             }
@@ -464,13 +506,15 @@ namespace PushHands.Physical
             foreach (var foot in feet)
             {
                 var support = foot.Body.GetComponents<ConfigurableJoint>()[1];
+                support.connectedAnchor = foot.StartPosition;
                 var drive = new JointDrive { positionSpring = Config.FootSpring, positionDamper = Config.FootDamper, maximumForce = Config.FootForce };
                 support.xDrive = support.zDrive = drive;
             }
             for (int i = 0; i < 2; i++) { PalmTargets[i] = palms[i].Body.position; Effort[i] = 0; }
-            Technique.Reset(); Stepping = false; unstable = stepTime = 0; stepSide = -1; look = Vector2.zero; LearningCorrection = Vector2.zero;
+            Technique.Reset(); Stepping = StepLanded = StepPresentationComplete = false; unstable = stepTime = landingTime = 0; stepSide = -1; look = Vector2.zero; LearningCorrection = Vector2.zero;
             controlLean = bodyTilt = Vector2.zero; restCenter = CaptureBalance().Center;
             ActivePushForce = Vector3.zero;
+            handPushForce[0] = handPushForce[1] = 0; feedbackPosition = feedbackAngles = Vector3.zero;
             activePressureMoment = Vector3.zero; filteredSupportShift = Vector2.zero; opponent = null;
             restGravityTorque = Vector3.zero;
             foreach (var bone in Bones) restGravityTorque += GravityMoment(bone, Pelvis.position);
@@ -481,9 +525,11 @@ namespace PushHands.Physical
         {
             Cache(); if (ViewCamera == null) return;
             Vector3 eye = named["Head"].Body.position + transform.forward * 0.095f - Vector3.up * 0.045f;
-            ViewCamera.transform.position = dt <= 0 ? eye : Vector3.Lerp(ViewCamera.transform.position, eye, 1 - Mathf.Exp(-18 * dt));
+            ViewCamera.transform.position = dt <= 0 ? eye : Vector3.Lerp(ViewCamera.transform.position - lastFeedbackWorld, eye, 1 - Mathf.Exp(-18 * dt));
             var balance = CaptureBalance();
-            ViewCamera.transform.rotation = transform.rotation * Quaternion.Euler(Config.ViewDownDegrees + look.y + Mathf.Clamp((balance.Center.y - restCenter.y) * 5, -2, 2), look.x, Mathf.Clamp(-balance.Center.x * 5, -2, 2));
+            lastFeedbackWorld = transform.TransformDirection(feedbackPosition);
+            ViewCamera.transform.position += lastFeedbackWorld;
+            ViewCamera.transform.rotation = transform.rotation * Quaternion.Euler(new Vector3(Config.ViewDownDegrees + look.y + Mathf.Clamp((balance.Center.y - restCenter.y) * 5, -2, 2), look.x, Mathf.Clamp(-balance.Center.x * 5, -2, 2)) + feedbackAngles);
         }
     }
 }

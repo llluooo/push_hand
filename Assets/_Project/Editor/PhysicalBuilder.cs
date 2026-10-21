@@ -14,6 +14,23 @@ namespace PushHands.Editor
     public static class PhysicalBuilder
     {
         public const string ScenePath = "Assets/_Project/Scenes/PushHandsPhysical.unity";
+        [MenuItem("推手/物理人偶/更新推动反馈资源")]
+        public static void ConfigureFeedback()
+        {
+            if (EditorApplication.isPlaying) throw new InvalidOperationException("请先退出运行模式。");
+            var config = AssetDatabase.LoadAssetAtPath<PhysicalConfig>("Assets/_Project/Configs/PhysicalConfig.asset");
+            if (config == null) throw new InvalidOperationException("物理参数资源不存在。");
+            // 仅保存新增字段的默认值，已有力量和平衡参数保持原值。
+            EditorUtility.SetDirty(config);
+            var font = AssetDatabase.LoadAssetAtPath<TMP_FontAsset>("Assets/_Project/Art/PhysicalFonts/PushHandsUI.asset");
+            if (font == null) throw new InvalidOperationException("物理原型字体资源不存在。");
+            // 字体子集更新会改变 glyph 索引，按原资源引用重建图集与缺字缓存。
+            font.ClearFontAssetData();
+            font.TryAddCharacters(File.ReadAllText("Assets/_Project/Art/PhysicalFonts/characters.txt"));
+            if (!font.HasCharacters("保护步展示中"))
+                throw new InvalidOperationException("请重新生成物理字体子集，结束展示提示存在缺字。");
+            EditorUtility.SetDirty(font); AssetDatabase.SaveAssets();
+        }
         [MenuItem("推手/物理人偶/生成独立物理原型")]
         public static void Generate()
         {

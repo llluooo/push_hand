@@ -36,6 +36,11 @@ namespace PushHands.Physical
         [Header("视角")]
         public float YawLimit = 35, PitchLimit = 20, PadLookSpeed = 85, MouseSensitivity = 0.10f;
         public float ViewDownDegrees = 8;
+        [Header("推动反馈与结束展示")]
+        public float ResultDisplaySeconds = 3, StepRecoverySeconds = 0.9f;
+        [Range(0, 1)] public float FeedbackVolume = 0.6f, HapticStrength = 0.65f;
+        public float FeedbackForceScale = 110, FeedbackResponse = 14, FeedbackCooldown = 0.18f;
+        public float CameraKickMeters = 0.012f, CameraKickDegrees = 0.65f;
         private void OnValidate()
         {
             FixedStep = Mathf.Clamp(FixedStep, 0.005f, 0.02f); Spacing = Mathf.Clamp(Spacing, 0.9f, 1.2f);

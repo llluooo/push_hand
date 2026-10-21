@@ -35,5 +35,13 @@ namespace PushHands.Physical
         }
         public void ConsumeTechniques(int slot, out bool w, out bool f)
         { w = withdraw[slot] || withdrawTap[slot]; f = feint[slot] || feintTap[slot]; withdrawTap[slot] = feintTap[slot] = false; }
+        // 观察不受发力键松开保护影响，也不采集或缓存重心与技巧。
+        public Vector2 ReadLook(int slot)
+        {
+            if (Roster.KeyboardDebug)
+                return slot == 0 && Mouse.current != null ? Mouse.current.delta.ReadValue() : Vector2.zero;
+            var pad = Roster.Device(slot);
+            return pad != null && pad.added && pad.enabled ? pad.rightStick.ReadValue() : Vector2.zero;
+        }
     }
 }

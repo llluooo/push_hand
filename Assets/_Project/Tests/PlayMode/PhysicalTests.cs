@@ -12,6 +12,176 @@ namespace PushHands.Tests
         private Scene scene;
         private PhysicalConfig config;
         private PhysicalFighter a, b;
+        private readonly System.Collections.Generic.List<Material> previewMaterials = new System.Collections.Generic.List<Material>();
+        private void PrepareResultPreview()
+        {
+            var lightObject = new GameObject("ResultPreviewLight"); SceneManager.MoveGameObjectToScene(lightObject, scene);
+            lightObject.layer = 18; lightObject.transform.rotation = Quaternion.Euler(45, -25, 0);
+            var lamp = lightObject.AddComponent<Light>(); lamp.type = LightType.Directional; lamp.intensity = 1.4f;
+            foreach (var fighter in new[] { a, b })
+            {
+                var material = new Material(Shader.Find("Standard"))
+                    { color = fighter == a ? new Color(0.18f, 0.48f, 0.72f) : new Color(0.86f, 0.42f, 0.20f) };
+                previewMaterials.Add(material);
+                foreach (var bone in fighter.Bones)
+                {
+                    bone.Body.GetComponent<Renderer>().sharedMaterial = material;
+                    bone.Body.gameObject.layer = bone.Region == ContactRegion.Head ? 16 + fighter.PlayerIndex : 14 + fighter.PlayerIndex;
+                }
+                fighter.ViewCamera.cullingMask = (1 << 14) | (1 << 15) | (1 << (17 - fighter.PlayerIndex)) | (1 << 18);
+            }
+            foreach (var root in scene.GetRootGameObjects()) if (root.name == "Cube") root.layer = 18;
+        }
+        private PhysicalMatch CreateMatch()
+        {
+            var obj = new GameObject("FeedbackTestMatch"); SceneManager.MoveGameObjectToScene(obj, scene);
+            var match = obj.AddComponent<PhysicalMatch>(); match.Config = config;
+            match.Fighters = new[] { a, b }; match.ExternalSimulation = true; match.Initialize();
+            match.Round.Ready(); match.Round.Start(); match.Tick(default, default, false, false, false, false, 3);
+            return match;
+        }
+        [Test] public void ResultDisplayWaitsThreeSecondsAndPauseStopsItsClock()
+        {
+            var match = CreateMatch(); match.Round.Resolve(false, true);
+            match.Tick(default, default, false, false, false, false, 2.99f);
+            Assert.IsFalse(match.CanRestart); Assert.AreEqual(1, match.Round.Resolutions);
+            float before = match.ResultSeconds; match.Freeze("测试暂停");
+            match.Tick(default, default, false, false, false, false, 1);
+            Assert.AreEqual(before, match.ResultSeconds); Assert.IsFalse(match.CanRestart);
+            match.ResetRound(); Assert.AreEqual(0, match.ResultSeconds); Assert.IsFalse(match.ResultPaused);
+            match.Round.Ready(); match.Round.Start(); match.Tick(default, default, false, false, false, false, 3);
+            match.Round.Resolve(true, true);
+            match.Tick(default, default, false, false, false, false, 3.01f);
+            Assert.IsTrue(match.CanRestart); Assert.AreEqual(RoundResult.Draw, match.Round.Result);
+        }
+        [Test] public void ResultImmediatelyClearsBothPlayersEffortAndTechnique()
+        {
+            var match = CreateMatch();
+            a.Drive(new PlayerIntent { LeftForce = 1, RightForce = 1, Lean = Vector2.up }, false, true, b, 0.1f);
+            match.Round.Resolve(false, true);
+            match.Tick(new PlayerIntent { LeftForce = 1, Lean = Vector2.up }, default, true, true, true, true, 0.01f);
+            foreach (var fighter in new[] { a, b })
+            {
+                Assert.AreEqual(0, fighter.Effort[0]); Assert.AreEqual(0, fighter.Effort[1]);
+                Assert.AreEqual(Technique.None, fighter.Technique.Active);
+                Assert.AreEqual(Vector3.zero, fighter.ActivePushForce);
+            }
+        }
+        [TestCase(0, 0.42f)] [TestCase(1, 0.42f)] [TestCase(0, 0.25f)]
+        public void DefeatShowsActualLandingAndRecoveryBeforeRestart(int attackerIndex, float stepSeconds)
+        {
+            config.StepSeconds = stepSeconds;
+            var match = CreateMatch();
+            PrepareResultPreview();
+            var attacker = attackerIndex == 0 ? a : b; var defender = attackerIndex == 0 ? b : a;
+            var attack = new PlayerIntent { LeftForce = 1, RightForce = 1, Lean = Vector2.up * 0.8f };
+            for (int i = 0; i < 300; i++)
+            {
+                match.Tick(default, default, false, false, false, false, 0.01f); scene.GetPhysicsScene().Simulate(0.01f);
+            }
+            int pressureFrames = 0;
+            for (int i = 0; i < 600 && match.Round.Phase == RoundPhase.Fighting; i++)
+            {
+                match.Tick(attackerIndex == 0 ? attack : default, attackerIndex == 0 ? default : attack,
+                    false, false, false, false, 0.01f);
+                scene.GetPhysicsScene().Simulate(0.01f);
+                if (match.Feedback.Hand(attackerIndex, 0).Pressure > 0.05f) pressureFrames++;
+            }
+            Assert.AreEqual(attackerIndex == 0 ? RoundResult.PlayerOne : RoundResult.PlayerTwo, match.Round.Result);
+            Assert.Greater(pressureFrames, 0, "实际合法推压必须进入表现层");
+            Assert.IsFalse(match.CanRestart);
+            if (attackerIndex == 0) SaveSplitView("defeat-start");
+            bool capturedLanding = false;
+            int landedTick = -1;
+            for (int i = 0; i < 400; i++)
+            {
+                match.Tick(attack, attack, true, true, true, true, 0.01f);
+                scene.GetPhysicsScene().Simulate(0.01f);
+                if (defender.StepLanded && !capturedLanding)
+                { capturedLanding = true; landedTick = i; if (attackerIndex == 0) SaveSplitView("defeat-landed"); }
+                if (landedTick >= 0 && i - landedTick < 89)
+                    Assert.IsFalse(defender.StepPresentationComplete, "落脚之后仍应保留约0.9秒恢复，不能从起步计时提前冻结");
+                Assert.AreEqual(Vector3.zero, attacker.ActivePushForce);
+                if (i == 100) Assert.IsFalse(match.CanRestart);
+            }
+            TestContext.WriteLine($"进攻方={attackerIndex} 落脚={defender.StepLanded} 完成={defender.StepPresentationComplete} 足部位移={defender.CaptureBalance().FootDisplacement:F3} 输家骨盆高度={defender.Pelvis.position.y:F3} 赢家骨盆高度={attacker.Pelvis.position.y:F3}");
+            Assert.IsTrue(defender.StepLanded); Assert.IsTrue(defender.StepPresentationComplete);
+            Assert.IsTrue(match.CanRestart); Assert.AreEqual(1, match.Round.Resolutions);
+            Assert.Greater(defender.CaptureBalance().FootDisplacement, 0.12f);
+            Assert.Greater(attacker.Pelvis.position.y, 0.7f);
+            if (attackerIndex == 0) SaveSplitView("defeat-settled");
+            match.ResetRound(); Assert.IsFalse(defender.StepLanded); Assert.AreEqual(0, match.Feedback.LowMotor(0));
+        }
+        [Test] public void MatchOwnsFeedbackThatCanBeClearedWithItsLifecycle()
+        {
+            var match = CreateMatch();
+            Assert.IsNotNull(match.GetComponent("PhysicalFeedback"), "对局初始化必须接入推动反馈，而非仅有未使用的反馈脚本");
+        }
+        [Test] public void CameraFeedbackCannotAccumulateWithRepeatedRendering()
+        {
+            a.RenderView(0); Vector3 eye = a.ViewCamera.transform.position;
+            a.SetFeedbackView(new Vector3(0, 0, -0.012f), Vector3.zero);
+            for (int i = 0; i < 100; i++) a.RenderView(0.01f);
+            Assert.LessOrEqual(Vector3.Distance(eye, a.ViewCamera.transform.position), 0.0121f,
+                "镜头反馈必须相对身体观察基准叠加，不能被跟随平滑再次积累");
+            a.SetFeedbackView(Vector3.zero, Vector3.zero); a.RenderView(0.01f);
+            Assert.Less(Vector3.Distance(eye, a.ViewCamera.transform.position), 0.0001f);
+        }
+        [Test] public void FeedbackClearStopsPressureMotorsAndCameraForBothPlayers()
+        {
+            var match = CreateMatch();
+            match.Feedback.Hand(0, 0).Tick(true, 110, 0.1f, config);
+            match.Feedback.Hand(1, 1).Tick(true, 55, 0.1f, config);
+            Assert.Greater(match.Feedback.LowMotor(0), 0);
+            match.Freeze("暂停");
+            for (int player = 0; player < 2; player++)
+            {
+                Assert.AreEqual(0, match.Feedback.LowMotor(player)); Assert.AreEqual(0, match.Feedback.HighMotor(player));
+                Assert.AreEqual(0, match.Feedback.Hand(player, 0).Pressure);
+                Assert.AreEqual(0, match.Feedback.Hand(player, 1).Pressure);
+            }
+        }
+        [Test] public void FinishedRoundCannotBeRestartedBeforeResultPresentation()
+        {
+            var match = CreateMatch();
+            var pad = UnityEngine.InputSystem.InputSystem.AddDevice<UnityEngine.InputSystem.Gamepad>();
+            var other = UnityEngine.InputSystem.InputSystem.AddDevice<UnityEngine.InputSystem.Gamepad>();
+            try
+            {
+                match.Input.Roster.Join(pad); match.Input.Roster.Join(other);
+                match.Round.Resolve(false, true);
+                UnityEngine.InputSystem.InputSystem.QueueStateEvent(pad,
+                    new UnityEngine.InputSystem.LowLevel.GamepadState().WithButton(UnityEngine.InputSystem.LowLevel.GamepadButton.Start));
+                UnityEngine.InputSystem.InputSystem.Update();
+                match.ExternalSimulation = false; match.SendMessage("Update"); match.ExternalSimulation = true;
+                Assert.AreEqual(RoundPhase.Finished, match.Round.Phase, "判负展示不能被菜单键立即截断");
+                Assert.AreEqual(RoundResult.PlayerOne, match.Round.Result);
+            }
+            finally
+            {
+                UnityEngine.InputSystem.InputSystem.RemoveDevice(pad);
+                UnityEngine.InputSystem.InputSystem.RemoveDevice(other);
+            }
+        }
+        [Test] public void FinishedRoundStillAcceptsObservationWhileTriggersAreHeld()
+        {
+            var match = CreateMatch();
+            var pad = UnityEngine.InputSystem.InputSystem.AddDevice<UnityEngine.InputSystem.Gamepad>();
+            try
+            {
+                match.Input.Roster.Join(pad); match.Round.Resolve(false, true);
+                a.RenderView(0); Quaternion before = a.ViewCamera.transform.rotation;
+                UnityEngine.InputSystem.InputSystem.QueueStateEvent(pad,
+                    new UnityEngine.InputSystem.LowLevel.GamepadState { rightStick = Vector2.right, leftTrigger = 1, leftStick = Vector2.up });
+                UnityEngine.InputSystem.InputSystem.Update();
+                match.ExternalSimulation = false; match.SendMessage("Update"); match.ExternalSimulation = true;
+                a.RenderView(0);
+                Assert.Greater(Quaternion.Angle(before, a.ViewCamera.transform.rotation), 0.001f,
+                    "展示阶段即使还按住推手／重心，也应能独立观察");
+                Assert.AreEqual(RoundResult.PlayerOne, match.Round.Result);
+            }
+            finally { UnityEngine.InputSystem.InputSystem.RemoveDevice(pad); }
+        }
         private static void Diagnostic(PhysicalFighter fighter, string name, int tick)
         {
             System.IO.Directory.CreateDirectory("Artifacts/Verification");
@@ -35,7 +205,10 @@ namespace PushHands.Tests
             PhysicalFighter.ConfigureInteraction(a, b);
         }
         [UnityTearDown] public IEnumerator Cleanup()
-        { Object.DestroyImmediate(config); yield return SceneManager.UnloadSceneAsync(scene); }
+        {
+            Object.DestroyImmediate(config); yield return SceneManager.UnloadSceneAsync(scene);
+            foreach (var material in previewMaterials) Object.DestroyImmediate(material); previewMaterials.Clear();
+        }
 
         [Test] public void BodyHasTwentyMassSegmentsAndFiniteJointDrives()
         {
