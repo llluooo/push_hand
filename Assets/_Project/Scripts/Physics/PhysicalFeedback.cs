@@ -12,9 +12,10 @@ namespace PushHands.Physical
         private readonly AudioSource[] pressureAudio = new AudioSource[2], transientAudio = new AudioSource[2];
         private readonly Gamepad[] drivenPads = new Gamepad[2];
         private readonly bool[] landed = new bool[2];
+        private readonly bool[] grounded = new bool[2];
         private readonly float[] landingImpact = new float[2];
         private readonly Vector3[] viewOffset = new Vector3[2], viewAngles = new Vector3[2];
-        private AudioClip contactClip, pressureClip, footClip;
+        private AudioClip contactClip, pressureClip, footClip, fallClip;
         public ContactFeedbackState Hand(int player, int side) => hands[player, side];
         public float LowMotor(int player) { return Motor(player, false); }
         public float HighMotor(int player) { return Motor(player, true); }
@@ -25,6 +26,7 @@ namespace PushHands.Physical
             contactClip = CreateClip("掌臂接触", 0.12f, 0);
             pressureClip = CreateClip("衣物与掌臂持续摩擦", 0.8f, 1);
             footClip = CreateClip("保护步落脚", 0.2f, 2);
+            fallClip = CreateClip("失足摔落接地", 0.28f, 3);
             for (int i = 0; i < 2; i++)
             {
                 var obj = new GameObject("Player" + (i + 1) + "Feedback"); obj.transform.SetParent(transform, false);
@@ -49,13 +51,16 @@ namespace PushHands.Physical
                     if (hands[player, side].ContactPulse) pulse = Mathf.Max(pulse, hands[player, side].Impact);
                 }
                 if (pulse > 0) transientAudio[player].PlayOneShot(contactClip, pulse * match.Config.FeedbackVolume * 0.45f);
+                bool fell = match.Fighters[player].GroundLanded;
                 bool footDown = match.Fighters[player].StepLanded;
-                if (footDown && !landed[player])
+                // 搭沿落脚后仍可能滑落，真实摔落接地是独立事件。
+                if ((fell && !grounded[player]) || (footDown && !landed[player]))
                 {
-                    transientAudio[player].PlayOneShot(footClip, match.Config.FeedbackVolume * 0.65f);
-                    landingImpact[player] = 0.45f;
+                    transientAudio[player].PlayOneShot(fell ? fallClip : footClip, match.Config.FeedbackVolume * (fell ? 0.8f : 0.65f));
+                    landingImpact[player] = fell ? 0.7f : 0.45f;
                 }
                 landed[player] = footDown;
+                grounded[player] = fell;
                 landingImpact[player] *= Mathf.Exp(-12 * dt);
             }
         }
@@ -104,6 +109,7 @@ namespace PushHands.Physical
                 if (transientAudio[player] != null) transientAudio[player].Stop();
                 viewOffset[player] = viewAngles[player] = Vector3.zero; landingImpact[player] = 0;
                 landed[player] = match != null && match.Fighters[player] != null && match.Fighters[player].StepLanded;
+                grounded[player] = match != null && match.Fighters[player] != null && match.Fighters[player].GroundLanded;
                 if (match != null && match.Fighters[player] != null) match.Fighters[player].SetFeedbackView(Vector3.zero, Vector3.zero);
             }
         }
@@ -114,6 +120,7 @@ namespace PushHands.Physical
             if (contactClip != null) Destroy(contactClip);
             if (pressureClip != null) Destroy(pressureClip);
             if (footClip != null) Destroy(footClip);
+            if (fallClip != null) Destroy(fallClip);
         }
         private static AudioClip CreateClip(string name, float seconds, int kind)
         {
@@ -128,7 +135,7 @@ namespace PushHands.Physical
                 float envelope = kind == 1 ? 0.5f : Mathf.Sin(Mathf.Clamp01(t / 0.006f) * Mathf.PI * 0.5f) * Mathf.Exp(-t * (kind == 0 ? 38 : 24));
                 // 循环声两端收敛至零，避免接缝爆音；原型音色可确定性复现。
                 if (kind == 1) envelope *= Mathf.Sin(Mathf.PI * i / (size - 1));
-                float body = kind == 1 ? 0 : Mathf.Sin(2 * Mathf.PI * (kind == 0 ? 180 : 85) * t) * 0.45f;
+                float body = kind == 1 ? 0 : Mathf.Sin(2 * Mathf.PI * (kind == 0 ? 180 : kind == 3 ? 58 : 85) * t) * 0.45f;
                 samples[i] = Mathf.Clamp((filtered * 0.7f + body) * envelope, -1, 1);
             }
             var clip = AudioClip.Create(name, size, 1, rate, false); clip.SetData(samples, 0); return clip;

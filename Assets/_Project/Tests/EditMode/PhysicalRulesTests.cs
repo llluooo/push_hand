@@ -5,6 +5,24 @@ namespace PushHands.Tests
 {
     public sealed class PhysicalRulesTests
     {
+        [Test] public void SavedFighterRestoresRuntimePhysicsSolverSettings()
+        {
+            var root = UnityEditor.PrefabUtility.LoadPrefabContents("Assets/_Project/Prefabs/Physical/Fighter0.prefab");
+            try
+            {
+                var fighter = root.GetComponent<PhysicalFighter>();
+                Assert.IsNotNull(fighter);
+                TestContext.WriteLine($"资源载入原始求解设置={fighter.Pelvis.solverIterations}/{fighter.Pelvis.solverVelocityIterations} 最大角速度={fighter.Pelvis.maxAngularVelocity}");
+                fighter.ResetPose();
+                foreach (var bone in fighter.Bones)
+                {
+                    Assert.AreEqual(16, bone.Body.solverIterations, "已保存资源必须恢复与运行时创建人偶一致的物理精度");
+                    Assert.AreEqual(8, bone.Body.solverVelocityIterations);
+                    Assert.AreEqual(12f, bone.Body.maxAngularVelocity);
+                }
+            }
+            finally { UnityEditor.PrefabUtility.UnloadPrefabContents(root); }
+        }
         [Test] public void JoiningOnlyReadiesAndCountdownLocksForThreeSeconds()
         {
             var round = new PhysicalRound(); round.Ready();

@@ -14,6 +14,76 @@ namespace PushHands.Editor
     public static class PhysicalBuilder
     {
         public const string ScenePath = "Assets/_Project/Scenes/PushHandsPhysical.unity";
+        [MenuItem("推手/物理人偶/更新独立低台与重心参数")]
+        public static void ConfigureArena()
+        {
+            if (EditorApplication.isPlaying) throw new InvalidOperationException("请先退出运行模式。");
+            foreach (var loaded in LoadedScenes()) if (loaded.isDirty)
+                throw new InvalidOperationException("当前场景有未保存的修改，未自动覆盖。");
+            var scene = EditorSceneManager.OpenScene(ScenePath);
+            var match = UnityEngine.Object.FindObjectOfType<PhysicalMatch>();
+            if (match == null || match.Fighters == null || match.Fighters.Length != 2)
+                throw new InvalidOperationException("物理场景缺少双人人偶和对局。");
+            var config = match.Config;
+            // 试玩后收窄旧默认台面；保留另行配置的地图尺寸。
+            if ((Mathf.Approximately(config.PlatformSize.x, 0.52f) && Mathf.Approximately(config.PlatformSize.y, 0.46f))
+                || (Mathf.Approximately(config.PlatformSize.x, 0.46f) && Mathf.Approximately(config.PlatformSize.y, 0.42f)))
+                config.PlatformSize = new Vector2(0.46f, 0.38f);
+            // 迁移旧版默认俯角，用户已自行调整的值保持不变。
+            if (Mathf.Approximately(config.ViewDownDegrees, 8) || Mathf.Approximately(config.ViewDownDegrees, 16)) config.ViewDownDegrees = 20;
+            var ground = GameObject.Find("PhysicalTrainingFloor");
+            if (ground == null) throw new InvalidOperationException("缺少原训练地面，未创建重复场地。");
+            ground.transform.position = new Vector3(0, -config.PlatformHeight - 0.06f, 0);
+            var arena = match.GetComponent<PhysicalArena>();
+            if (arena == null) arena = match.gameObject.AddComponent<PhysicalArena>();
+            arena.LandingGround = ground.GetComponent<Collider>();
+            if (arena.Platforms == null || arena.Platforms.Length != 2) arena.Platforms = new BoxCollider[2];
+            arena.SpawnOffsets = new Vector3[2];
+            var platformMaterial = Material("Platform", new Color(0.35f, 0.40f, 0.46f));
+            for (int i = 0; i < 2; i++)
+            {
+                if (arena.Platforms[i] == null)
+                {
+                    var obj = GameObject.CreatePrimitive(PrimitiveType.Cube); obj.name = "Player" + (i + 1) + "Platform";
+                    arena.Platforms[i] = obj.GetComponent<BoxCollider>();
+                }
+                var platform = arena.Platforms[i];
+                platform.transform.rotation = Quaternion.Euler(0, i * 180, 0);
+                platform.transform.position = new Vector3(0, -config.PlatformHeight * 0.5f - 0.01f, (i == 0 ? -1 : 1) * config.Spacing * 0.5f)
+                    + platform.transform.forward * config.PlatformForwardOffset;
+                arena.SpawnOffsets[i] = Vector3.back * config.PlatformForwardOffset;
+                platform.transform.localScale = new Vector3(config.PlatformSize.x, config.PlatformHeight, config.PlatformSize.y);
+                platform.sharedMaterial = arena.LandingGround.sharedMaterial;
+                platform.GetComponent<Renderer>().sharedMaterial = platformMaterial;
+            }
+            Physics.SyncTransforms(); match.Arena = arena;
+            for (int i = 0; i < 2; i++)
+            {
+                match.Fighters[i].Arena = arena; match.Fighters[i].RelocateSpawn(arena.SpawnPosition(i));
+                match.Fighters[i].ViewCamera.fieldOfView = config.ViewFieldOfView;
+            }
+            EditorUtility.SetDirty(config); EditorSceneManager.MarkSceneDirty(scene);
+            EditorSceneManager.SaveScene(scene); AssetDatabase.SaveAssets();
+            CompleteArenaInspection(match);
+        }
+        private static void CompleteArenaInspection(PhysicalMatch match)
+        {
+            if (match.Arena == null || match.Arena.Platforms.Length != 2) throw new InvalidOperationException("场地引用未保存。");
+            foreach (var platform in match.Arena.Platforms)
+                if (platform == null || match.Arena.LandingGround == null || platform.bounds.max.y <= match.Arena.LandingGround.bounds.max.y)
+                    throw new InvalidOperationException("站台或下方地面的配置无效。");
+            foreach (var fighter in match.Fighters)
+            {
+                if (fighter.Arena != match.Arena || fighter.Config != match.Config) throw new InvalidOperationException("人偶场地或参数引用不一致。");
+                foreach (var bone in fighter.Bones)
+                    if (bone.Body == null || bone.Joint == null) throw new InvalidOperationException("人偶存在缺失引用。");
+            }
+            Directory.CreateDirectory("Artifacts/Verification");
+            File.WriteAllText("Artifacts/Verification/arena-setup.txt", "独立站台=2\n台面尺寸=" + match.Config.PlatformSize
+                + "\n台面前移=" + match.Config.PlatformForwardOffset + "\n出生点1=" + match.Arena.SpawnPosition(0) + "\n出生点2=" + match.Arena.SpawnPosition(1)
+                + "\n台高=" + match.Config.PlatformHeight + "\n落地面=" + match.Arena.LandingGround.bounds.max.y
+                + "\n视角=" + match.Config.ViewFieldOfView + "\n俯角=" + match.Config.ViewDownDegrees + "\n资源引用检查=通过");
+        }
         [MenuItem("推手/物理人偶/更新推动反馈资源")]
         public static void ConfigureFeedback()
         {
@@ -92,6 +162,7 @@ namespace PushHands.Editor
             }
             PhysicalFighter.ConfigureInteraction(match.Fighters[0], match.Fighters[1]);
             EditorSceneManager.SaveScene(physicalScene, ScenePath); AssetDatabase.SaveAssets();
+            ConfigureArena();
             // 不覆盖原灰盒 Build Settings；构建入口显式指定独立场景。
             Debug.Log("独立物理原型已生成：" + ScenePath);
         }
@@ -105,6 +176,7 @@ namespace PushHands.Editor
             EditorSceneManager.OpenScene(ScenePath);
             var match = UnityEngine.Object.FindObjectOfType<PhysicalMatch>();
             if (match == null) throw new InvalidOperationException("物理场景缺少对局控制器。");
+            CompleteArenaInspection(match);
             Selection.activeGameObject = match.gameObject;
             CapturePreview(match);
             Debug.Log("物理试玩已就绪：点击 Play，F1 后按 Enter 可键鼠试玩；双手柄分别按菜单键加入。");

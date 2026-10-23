@@ -8,6 +8,7 @@ namespace PushHands.Physical
     public sealed class PhysicalMatch : MonoBehaviour
     {
         public PhysicalConfig Config;
+        public PhysicalArena Arena;
         public PhysicalFighter[] Fighters;
         public TMP_Text[] Hud, CountdownHud;
         public PhysicalRecorder Recorder;
@@ -41,7 +42,7 @@ namespace PushHands.Physical
             if (Fighters == null || Fighters.Length != 2)
                 Fighters = new[] { PhysicalFighter.Create(0, Config, null), PhysicalFighter.Create(1, Config, null) };
             PhysicalFighter.ConfigureInteraction(Fighters[0], Fighters[1]);
-            foreach (var fighter in Fighters) fighter.ResetPose();
+            foreach (var fighter in Fighters) { if (Arena != null) fighter.Arena = Arena; fighter.ResetPose(); }
             Input = new PhysicalInput(); Input.Roster.DeviceLost += () => Freeze("手柄断开：补位后按菜单键继续");
             Feedback = GetComponent<PhysicalFeedback>();
             if (Feedback == null) Feedback = gameObject.AddComponent<PhysicalFeedback>();
@@ -207,7 +208,7 @@ namespace PushHands.Physical
                 case RoundPhase.Frozen: status = freezeReason; break;
                 case RoundPhase.Fighting: status = "对抗中 · 先迈步者负"; break;
                 default: status = Round.Result == RoundResult.Draw ? "双方迈步 · 平局" : Round.Result == RoundResult.PlayerOne ? "玩家一获胜" : "玩家二获胜";
-                    status += ResultPaused ? " · " + freezeReason : CanRestart ? " · 菜单键重开" : " · 保护步展示中"; break;
+                    status += ResultPaused ? " · " + freezeReason : CanRestart ? " · 菜单键重开" : " · 动作展示中"; break;
             }
             if (Input.Roster.KeyboardDebug) status = "键鼠验证 · 对手" + (DebugOpponentPush ? "自动轻推" : "准备") + "\nF2：自动轻推\n" + status.Replace("菜单键", "Enter");
             for (int i = 0; i < 2; i++)

@@ -5,7 +5,7 @@ namespace PushHands.Physical
     [CreateAssetMenu(menuName = "推手/物理人偶参数")]
     public sealed class PhysicalConfig : ScriptableObject
     {
-        public const string Version = "physical-v3";
+        public const string Version = "physical-v4";
         [Header("固定步与站姿")]
         [Range(0.005f, 0.02f)] public float FixedStep = 0.01f;
         [Range(0.9f, 1.2f)] public float Spacing = 0.98f;
@@ -18,6 +18,8 @@ namespace PushHands.Physical
         public float MaximumStandForce = 1150, MaximumBalanceForce = 160;
         public float PassiveBalanceForce = 35, PassiveRootTorque = 25, ActiveRootTorque = 100;
         public float LeanTravel = 0.14f;
+        public float LeanInputSpeed = 1.0f;
+        public float ExtremeLeanTravel = 0.055f;
         public float ActiveBalancePush = 110;
         public float ProtectiveStepDistance = 0.22f, StepLiftHeight = 0.09f, StepSeconds = 0.42f, MaximumStepForce = 350;
         public float StandingStiffness = 80, StandingDamping = 18;
@@ -35,12 +37,16 @@ namespace PushHands.Physical
         public float HandPlaneSpring = 300, HandPlaneDamper = 25, MaximumHandPlaneForce = 55;
         [Header("视角")]
         public float YawLimit = 35, PitchLimit = 20, PadLookSpeed = 85, MouseSensitivity = 0.10f;
-        public float ViewDownDegrees = 8;
+        public float ViewDownDegrees = 20, ViewFieldOfView = 86;
         [Header("推动反馈与结束展示")]
         public float ResultDisplaySeconds = 3, StepRecoverySeconds = 0.9f;
         [Range(0, 1)] public float FeedbackVolume = 0.6f, HapticStrength = 0.65f;
         public float FeedbackForceScale = 110, FeedbackResponse = 14, FeedbackCooldown = 0.18f;
         public float CameraKickMeters = 0.012f, CameraKickDegrees = 0.65f;
+        [Header("独立低台与失足")]
+        public Vector2 PlatformSize = new Vector2(0.46f, 0.38f);
+        public float PlatformForwardOffset = 0.02f;
+        public float PlatformHeight = 0.55f, FallLandingSeconds = 0.9f, ResultTimeoutSeconds = 8;
         private void OnValidate()
         {
             FixedStep = Mathf.Clamp(FixedStep, 0.005f, 0.02f); Spacing = Mathf.Clamp(Spacing, 0.9f, 1.2f);
@@ -53,7 +59,15 @@ namespace PushHands.Physical
             ContactBodyShare = Mathf.Clamp01(ContactBodyShare); PassiveBalanceForce = Mathf.Clamp(PassiveBalanceForce, 0, MaximumBalanceForce);
             PassiveRootTorque = Mathf.Clamp(PassiveRootTorque, 0, BodyTorque); ActiveRootTorque = Mathf.Clamp(ActiveRootTorque, PassiveRootTorque, BodyTorque);
             LeanTravel = Mathf.Clamp(LeanTravel, 0.05f, 0.18f); ActiveBalancePush = Mathf.Clamp(ActiveBalancePush, 0, 200);
+            LeanInputSpeed = Mathf.Clamp(LeanInputSpeed, 0.3f, 4);
+            ExtremeLeanTravel = Mathf.Clamp(ExtremeLeanTravel, 0, 0.10f);
             StepSeconds = Mathf.Clamp(StepSeconds, 0.25f, 0.8f); MaximumStepForce = Mathf.Clamp(MaximumStepForce, 100, 600);
+            PlatformSize.x = Mathf.Clamp(PlatformSize.x, 0.46f, 2); PlatformSize.y = Mathf.Clamp(PlatformSize.y, 0.38f, 2);
+            PlatformForwardOffset = Mathf.Clamp(PlatformForwardOffset, -0.1f, 0.1f);
+            PlatformHeight = Mathf.Clamp(PlatformHeight, 0.2f, 2);
+            ViewFieldOfView = Mathf.Clamp(ViewFieldOfView, 65, 100);
+            FallLandingSeconds = Mathf.Clamp(FallLandingSeconds, 0.3f, 3);
+            ResultTimeoutSeconds = Mathf.Clamp(ResultTimeoutSeconds, Mathf.Max(5, ResultDisplaySeconds + 1), 20);
         }
     }
 }

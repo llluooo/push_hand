@@ -12,7 +12,9 @@ namespace PushHands.Tests
         private Scene scene;
         private PhysicalConfig config;
         private PhysicalFighter a, b;
+        private readonly System.Collections.Generic.List<AudioListener> previousListeners = new System.Collections.Generic.List<AudioListener>();
         private readonly System.Collections.Generic.List<Material> previewMaterials = new System.Collections.Generic.List<Material>();
+        private readonly System.Collections.Generic.List<PhysicMaterial> supportMaterials = new System.Collections.Generic.List<PhysicMaterial>();
         private void PrepareResultPreview()
         {
             var lightObject = new GameObject("ResultPreviewLight"); SceneManager.MoveGameObjectToScene(lightObject, scene);
@@ -195,6 +197,9 @@ namespace PushHands.Tests
         }
         [SetUp] public void Setup()
         {
+            previousListeners.Clear();
+            foreach (var listener in Object.FindObjectsOfType<AudioListener>())
+                if (listener.enabled) { previousListeners.Add(listener); listener.enabled = false; }
             scene = SceneManager.CreateScene("PhysicalTest", new CreateSceneParameters(LocalPhysicsMode.Physics3D));
             config = ScriptableObject.CreateInstance<PhysicalConfig>();
             var floor = GameObject.CreatePrimitive(PrimitiveType.Cube);
@@ -207,7 +212,9 @@ namespace PushHands.Tests
         [UnityTearDown] public IEnumerator Cleanup()
         {
             Object.DestroyImmediate(config); yield return SceneManager.UnloadSceneAsync(scene);
+            foreach (var listener in previousListeners) if (listener != null) listener.enabled = true;
             foreach (var material in previewMaterials) Object.DestroyImmediate(material); previewMaterials.Clear();
+            foreach (var material in supportMaterials) Object.DestroyImmediate(material); supportMaterials.Clear();
         }
 
         [Test] public void BodyHasTwentyMassSegmentsAndFiniteJointDrives()
@@ -547,6 +554,395 @@ namespace PushHands.Tests
             TestContext.WriteLine($"提前撤手：防守迈步={defenderStep}，进攻迈步={attackerStep}，卸载帧={unloaded}");
             Assert.IsFalse(defenderStep, "正确时机撤手应能避开原本打破待机架势的首轮进攻");
             Assert.Greater(unloaded, 10, "撤手要实际撤去接触压力，而非只播放动作");
+        }
+        [TestCase(-0.55f)] [TestCase(0.55f)]
+        public void OrdinaryLeanCanBeHeldAndReleasedWithoutProtectiveStep(float amount)
+        {
+            PrepareLowArena();
+            a.SetFrozen(false); b.SetFrozen(false);
+            for (int i = 0; i < 250; i++) SimulatePair(default, default);
+            bool stepped = false; float firstStep = -1, peakSpeed = 0;
+            for (int i = 0; i < 650; i++)
+            {
+                float input = i < 450 ? amount : 0;
+                SimulatePair(new PlayerIntent { Lean = Vector2.up * input }, default);
+                bool failed = a.AssessStep(0.01f);
+                if (failed && firstStep < 0) firstStep = i * 0.01f;
+                stepped |= failed; peakSpeed = Mathf.Max(peakSpeed, a.CaptureBalance().Velocity.magnitude);
+            }
+            TestContext.WriteLine($"普通倾身={amount} 首次迈步={firstStep:F2}s 峰值速度={peakSpeed:F3} 重心={a.CaptureBalance().Center:F3}");
+            Assert.IsFalse(stepped, "普通幅度主动倾身应稳得住并能松开恢复");
+            Assert.Less(a.CaptureBalance().Velocity.magnitude, 0.06f);
+        }
+        [TestCase(-1f)] [TestCase(1f)]
+        public void ExtremeLeanHasRecoveryWindowButCanEventuallyLoseBalance(float amount)
+        {
+            a.SetFrozen(false); b.SetFrozen(false);
+            for (int i = 0; i < 250; i++) SimulatePair(default, default);
+            float firstStep = -1;
+            for (int i = 0; i < 700; i++)
+            {
+                SimulatePair(new PlayerIntent { Lean = Vector2.up * amount }, default);
+                if (a.AssessStep(0.01f)) { firstStep = i * 0.01f; break; }
+            }
+            TestContext.WriteLine($"极限倾身={amount} 首次迈步={firstStep:F2}s 重心={a.CaptureBalance().Center:F3}");
+            Assert.Greater(firstStep, 1.0f, "极限动作也应留出察觉和收回的机会");
+            Assert.Less(firstStep, 7f, "持续极限倾身本身应有失衡风险");
+        }
+        [TestCase(-1f)] [TestCase(1f)]
+        public void BriefFullLeanCanBeReleasedBeforeLosingBalance(float amount)
+        {
+            PrepareLowArena();
+            a.SetFrozen(false); b.SetFrozen(false);
+            for (int i = 0; i < 250; i++) SimulatePair(default, default);
+            for (int i = 0; i < 300; i++)
+            {
+                SimulatePair(new PlayerIntent { Lean = i < 45 ? Vector2.up * amount : Vector2.zero }, default);
+                Assert.IsFalse(a.AssessStep(0.01f), $"短按极限倾身后收回应能恢复，方向={amount} tick={i}");
+            }
+            Assert.Less(a.CaptureBalance().Velocity.magnitude, 0.06f);
+        }
+        [Test] public void LeanDirectionChangesDoNotThrowTheBodyAcrossItsSupport()
+        {
+            PrepareLowArena();
+            a.SetFrozen(false); b.SetFrozen(false);
+            for (int i = 0; i < 250; i++) SimulatePair(default, default);
+            for (int i = 0; i < 600; i++)
+            {
+                float amount = i < 400 ? (i / 100 % 2 == 0 ? 0.55f : -0.55f) : 0;
+                SimulatePair(new PlayerIntent { Lean = Vector2.up * amount }, default);
+                Assert.IsFalse(a.AssessStep(0.01f), $"普通倾身反向不应把自己甩出支撑范围，tick={i}");
+            }
+        }
+        private PhysicalArena PrepareLowArena(float height = 0.55f, float width = -1, float depth = -1)
+        {
+            if (width < 0) width = config.PlatformSize.x;
+            if (depth < 0) depth = config.PlatformSize.y;
+            var floor = scene.GetRootGameObjects()[0];
+            floor.transform.position = new Vector3(0, -height - 0.06f, 0);
+            var arena = floor.AddComponent<PhysicalArena>();
+            var platforms = new BoxCollider[2];
+            for (int i = 0; i < 2; i++)
+            {
+                var platform = GameObject.CreatePrimitive(PrimitiveType.Cube);
+                SceneManager.MoveGameObjectToScene(platform, scene);
+                platform.name = "LowPlatform" + i;
+                platform.transform.rotation = (i == 0 ? a : b).transform.rotation;
+                platform.transform.position = new Vector3(0, -height * 0.5f - 0.01f, (i == 0 ? -1 : 1) * config.Spacing * 0.5f)
+                    + platform.transform.forward * config.PlatformForwardOffset;
+                arena.SpawnOffsets[i] = Vector3.back * config.PlatformForwardOffset;
+                platform.transform.localScale = new Vector3(width, height, depth);
+                platforms[i] = platform.GetComponent<BoxCollider>();
+            }
+            arena.Platforms = platforms; arena.LandingGround = floor.GetComponent<Collider>();
+            var friction = new PhysicMaterial("LowArenaSceneFriction")
+            { staticFriction = 0.9f, dynamicFriction = 0.75f, bounciness = 0, frictionCombine = PhysicMaterialCombine.Average };
+            supportMaterials.Add(friction);
+            foreach (var root in scene.GetRootGameObjects())
+                foreach (var collider in root.GetComponentsInChildren<Collider>()) collider.sharedMaterial = friction;
+            a.Arena = b.Arena = arena;
+            Physics.SyncTransforms(); return arena;
+        }
+        [TestCase(0)] [TestCase(1)]
+        public void LowPlatformSpawnOffsetKeepsBothStandingFeetOverTheirOwnPlatform(int playerIndex)
+        {
+            var arena = PrepareLowArena();
+            var fighter = playerIndex == 0 ? a : b;
+            Vector3 originalSpawn = fighter.transform.position;
+            fighter.RelocateSpawn(arena.SpawnPosition(playerIndex));
+            Physics.SyncTransforms();
+            Assert.Less(Vector3.Distance(originalSpawn, fighter.transform.position), 0.0001f,
+                "台面偏移不应改变双方接触距离，重建出生位置也不能抵消台沿调校");
+            var top = arena.Platforms[playerIndex].bounds;
+            foreach (var bone in fighter.Bones)
+            {
+                if (!bone.Name.EndsWith("Foot")) continue;
+                var sole = bone.Collider.bounds;
+                Assert.GreaterOrEqual(sole.min.x, top.min.x - 0.0001f);
+                Assert.LessOrEqual(sole.max.x, top.max.x + 0.0001f);
+                Assert.GreaterOrEqual(sole.min.z, top.min.z - 0.0001f);
+                Assert.LessOrEqual(sole.max.z, top.max.z + 0.0001f);
+            }
+        }
+        [TestCase(0)] [TestCase(1)]
+        public void LosingOnLowPlatformFallsOntoActualLowerGround(int attackerIndex)
+        {
+            PrepareLowArena(); var match = CreateMatch(); PrepareResultPreview();
+            var attacker = attackerIndex == 0 ? a : b; var loser = attackerIndex == 0 ? b : a;
+            for (int i = 0; i < 300; i++)
+            { match.Tick(default, default, false, false, false, false, 0.01f); scene.GetPhysicsScene().Simulate(0.01f); }
+            var push = new PlayerIntent { LeftForce = 1, RightForce = 1, Lean = Vector2.up * 0.8f };
+            var retreat = new PlayerIntent { Lean = Vector2.down * 0.75f };
+            for (int i = 0; i < 650 && match.Round.Phase == RoundPhase.Fighting; i++)
+            {
+                match.Tick(attackerIndex == 0 ? push : retreat, attackerIndex == 0 ? retreat : push, false, false, false, false, 0.01f);
+                scene.GetPhysicsScene().Simulate(0.01f);
+            }
+            Assert.AreEqual(attackerIndex == 0 ? RoundResult.PlayerOne : RoundResult.PlayerTwo, match.Round.Result);
+            TestContext.WriteLine($"判负速度={loser.CaptureBalance().Velocity:F3} 趋势={loser.CaptureBalance().Predicted:F3} 支撑需求={loser.CaptureBalance().RequiredSupport:F3}");
+            bool sawLandingFeedback = false, sawGround = false, checkedFootLanding = false;
+            for (int i = 0; i < 650; i++)
+            {
+                match.Tick(push, push, true, true, true, true, 0.01f);
+                if (loser.StepLanded && !checkedFootLanding)
+                {
+                    PhysicalBone moved = null; float farthest = -1;
+                    foreach (var bone in loser.Bones)
+                    {
+                        if (!bone.Name.EndsWith("Foot")) continue;
+                        Vector3 delta = bone.Body.position - bone.StartPosition; delta.y = 0;
+                        if (delta.sqrMagnitude > farthest) { moved = bone; farthest = delta.sqrMagnitude; }
+                    }
+                    Assert.IsTrue(loser.Arena.HasPlatformContact(moved.Body.GetComponent<PhysicalContact>()), "搭沿落脚必须对应真实足部接触");
+                    checkedFootLanding = true;
+                }
+                if (loser.GroundLanded && !sawGround)
+                { sawGround = true; sawLandingFeedback = match.Feedback.LowMotor(1 - attackerIndex) > 0.05f; }
+                scene.GetPhysicsScene().Simulate(0.01f);
+            }
+            TestContext.WriteLine($"低台：赢家={attackerIndex} 输家骨盆={loser.Pelvis.position:F3} 赢家骨盆={attacker.Pelvis.position:F3} 完成={loser.StepPresentationComplete}");
+            Assert.Less(loser.Pelvis.position.y, 0.2f, "保护步踩空后必须跌落，不能被旧的站姿锚点托在台面高度");
+            Assert.Greater(attacker.Pelvis.position.y, 0.7f, "清空发力后赢家应保持站立");
+            Assert.IsTrue(loser.StepPresentationComplete); Assert.IsTrue(match.CanRestart);
+            Assert.IsTrue(loser.Falling); Assert.IsTrue(loser.GroundLanded);
+            if (loser.StepLanded) Assert.IsTrue(checkedFootLanding, "允许先真实搭沿再滚落，不伪报落脚");
+            Assert.IsFalse(loser.PresentationTimedOut);
+            Assert.IsTrue(sawLandingFeedback, "实际摔落接地应触发反馈，不能继续只监听成功保护步");
+            foreach (var bone in loser.Bones)
+                Assert.AreEqual(0, loser.ViewCamera.cullingMask & (1 << bone.Body.gameObject.layer),
+                    "倒地视角不能被自己的肩膀或躯干堵住，但对手仍应看得到身体");
+            Assert.AreEqual(1, match.Round.Resolutions);
+            attacker.RenderView(0);
+            bool bodyVisible = false;
+            foreach (var bone in loser.Bones)
+            {
+                if (bone.Region != ContactRegion.Torso) continue;
+                Vector3 view = attacker.ViewCamera.WorldToViewportPoint(bone.Body.position);
+                bodyVisible |= view.z > 0 && view.x > 0.08f && view.x < 0.92f && view.y > 0.08f && view.y < 0.92f;
+            }
+            Assert.IsTrue(bodyVisible, "胜者正常第一人称视野内应能看清对手摔落后的身体，而非只剩屏幕底边的一角");
+            if (attackerIndex == 0) SaveSplitView("arena-settled");
+            match.ResetRound();
+            Assert.Greater(loser.Pelvis.position.y, 0.85f);
+            Assert.IsFalse(loser.StepPresentationComplete);
+            foreach (var bone in loser.Bones)
+                if (bone.Region == ContactRegion.Torso)
+                    Assert.AreNotEqual(0, loser.ViewCamera.cullingMask & (1 << bone.Body.gameObject.layer), "重开后应恢复正常第一人称身体可见性");
+        }
+        [TestCase(-1f)] [TestCase(1f)]
+        public void ExtremeLeanOnLowPlatformUsesItsActualFallDirection(float amount)
+        {
+            PrepareLowArena(); var match = CreateMatch();
+            var lean = new PlayerIntent { Lean = Vector2.up * amount };
+            for (int i = 0; i < 350 && match.Round.Phase == RoundPhase.Fighting; i++)
+            { match.Tick(lean, default, false, false, false, false, 0.01f); scene.GetPhysicsScene().Simulate(0.01f); }
+            Assert.AreEqual(RoundResult.PlayerTwo, match.Round.Result);
+            for (int i = 0; i < 850 && !match.CanRestart; i++)
+            { match.Tick(default, default, false, false, false, false, 0.01f); scene.GetPhysicsScene().Simulate(0.01f); }
+            TestContext.WriteLine($"极限失足方向={amount} 前后位移={a.Pelvis.position.z - a.transform.position.z:F3} 落地={a.GroundLanded} 超时={a.PresentationTimedOut}");
+            Assert.IsFalse(a.PresentationTimedOut);
+            if (a.Falling)
+            {
+                Assert.IsTrue(a.GroundLanded);
+                Assert.Greater((a.Pelvis.position.z - a.transform.position.z) * amount, 0.12f);
+            }
+            else
+            {
+                Assert.IsTrue(a.StepLanded, "脚底实际仍搭台面时应保留真实保护步");
+                Assert.Greater(a.CaptureBalance().FootDisplacement, 0.12f);
+            }
+            Assert.IsTrue(match.CanRestart);
+        }
+        [TestCase("backward", 0)] [TestCase("backward", 1)]
+        [TestCase("forward", 0)] [TestCase("forward", 1)]
+        [TestCase("push-idle", 0)] [TestCase("push-idle", 1)]
+        public void DefaultLowPlatformShowsRealFallsForForwardBackwardAndIdleDefense(string scenario, int playerIndex)
+        {
+            PrepareLowArena(); var match = CreateMatch();
+            for (int i = 0; i < 300; i++)
+            { match.Tick(default, default, false, false, false, false, 0.01f); scene.GetPhysicsScene().Simulate(0.01f); }
+            bool pushing = scenario.StartsWith("push");
+            var input = pushing
+                ? new PlayerIntent { LeftForce = 1, RightForce = 1, Lean = Vector2.up * 0.8f }
+                : new PlayerIntent { Lean = scenario == "backward" ? Vector2.down : Vector2.up };
+            var active = playerIndex == 0 ? a : b;
+            var loser = pushing ? (playerIndex == 0 ? b : a) : active;
+            for (int i = 0; i < 700 && match.Round.Phase == RoundPhase.Fighting; i++)
+            { match.Tick(playerIndex == 0 ? input : default, playerIndex == 1 ? input : default, false, false, false, false, 0.01f); scene.GetPhysicsScene().Simulate(0.01f); }
+            Assert.AreEqual(loser == b ? RoundResult.PlayerOne : RoundResult.PlayerTwo, match.Round.Result);
+            var balance = loser.CaptureBalance();
+            TestContext.WriteLine($"{scenario} 判负时: 重心={balance.Center:F3} 速度={balance.Velocity:F3} 需求={balance.RequiredSupport:F3} 预测={balance.Predicted:F3}");
+            for (int i = 0; i < 850 && !match.CanRestart; i++)
+            {
+                match.Tick(default, default, false, false, false, false, 0.01f); scene.GetPhysicsScene().Simulate(0.01f);
+            }
+            TestContext.WriteLine($"{scenario} 最终: 摔落={loser.Falling} 接地={loser.GroundLanded} 落脚={loser.StepLanded} 骨盆={loser.transform.InverseTransformPoint(loser.Pelvis.position):F3}");
+            Assert.IsTrue(loser.Falling, "默认小台上此代表性失衡应体现实际失足，不能只回归向前扑空");
+            Assert.IsTrue(loser.GroundLanded); Assert.IsFalse(loser.PresentationTimedOut);
+        }
+        [TestCase(0.35f)] [TestCase(0.95f)]
+        public void RaisedPlatformsUseSpawnRelativeStandingAndFailureHeights(float elevation)
+        {
+            var arena = PrepareLowArena();
+            foreach (var platform in arena.Platforms) platform.transform.position += Vector3.up * elevation;
+            Physics.SyncTransforms();
+            a.RelocateSpawn(arena.SpawnPosition(0)); b.RelocateSpawn(arena.SpawnPosition(1));
+            a.SetFrozen(false); b.SetFrozen(false);
+            for (int i = 0; i < 400; i++)
+            { SimulatePair(default, default); Assert.IsFalse(a.AssessStep(0.01f)); }
+            Assert.That(a.Pelvis.position.y - elevation, Is.InRange(0.85f, 1.02f));
+            // 整个人偶压低至台面附近；高台不能让旧的绝对高度阈值掩盖塌陷。
+            foreach (var bone in a.Bones) bone.Body.position -= Vector3.up * 0.45f;
+            for (int i = 0; i < 25; i++) a.AssessStep(0.01f);
+            Assert.IsTrue(a.Stepping);
+        }
+        [Test] public void WidePlatformKeepsARealSupportedStepInsteadOfForcingAFall()
+        {
+            PrepareLowArena(0.55f, 0.82f, 0.86f); var match = CreateMatch();
+            for (int i = 0; i < 300; i++)
+            { match.Tick(default, default, false, false, false, false, 0.01f); scene.GetPhysicsScene().Simulate(0.01f); }
+            var push = new PlayerIntent { LeftForce = 1, RightForce = 1, Lean = Vector2.up * 0.8f };
+            for (int i = 0; i < 650 && match.Round.Phase == RoundPhase.Fighting; i++)
+            { match.Tick(push, default, false, false, false, false, 0.01f); scene.GetPhysicsScene().Simulate(0.01f); }
+            Assert.AreEqual(RoundResult.PlayerOne, match.Round.Result);
+            for (int i = 0; i < 500; i++)
+            { match.Tick(default, default, false, false, false, false, 0.01f); scene.GetPhysicsScene().Simulate(0.01f); }
+            Assert.IsTrue(b.StepLanded); Assert.IsFalse(b.Falling); Assert.IsFalse(b.GroundLanded);
+            Assert.IsTrue(match.CanRestart); Assert.IsFalse(b.PresentationTimedOut);
+        }
+        [Test] public void FootStillOverlappingTheEdgeIsNotTreatedAsCompletelyUnsupported()
+        {
+            var arena = PrepareLowArena();
+            PhysicalBone foot = null;
+            foreach (var bone in a.Bones) if (bone.Name == "RightFoot") foot = bone;
+            foot.Body.position = new Vector3(arena.Platforms[0].bounds.max.x + 0.02f, foot.Body.position.y, foot.Body.position.z);
+            Physics.SyncTransforms();
+            // 中心越界，但足底仍覆盖台面；不能等同于整只脚踩空。
+            Assert.IsTrue(arena.HasPlatformBelow(foot.Collider));
+        }
+        [TestCase(-1f)] [TestCase(1f)]
+        public void FallBeginsOnlyAfterTheActualSteppingFootLeavesPlatformFootprint(float amount)
+        {
+            var arena = PrepareLowArena(); var match = CreateMatch();
+            for (int i = 0; i < 350 && match.Round.Phase == RoundPhase.Fighting; i++)
+            { match.Tick(new PlayerIntent { Lean = Vector2.up * amount }, default, false, false, false, false, 0.01f); scene.GetPhysicsScene().Simulate(0.01f); }
+            for (int i = 0; i < 100 && !a.Falling; i++)
+            { match.Tick(default, default, false, false, false, false, 0.01f); scene.GetPhysicsScene().Simulate(0.01f); }
+            if (!a.Falling) { Assert.IsTrue(a.StepLanded, "实际仍有支撑时应完成真实落脚"); return; }
+            PhysicalBone moved = null; float distance = -1;
+            foreach (var bone in a.Bones)
+            {
+                if (!bone.Name.EndsWith("Foot")) continue;
+                Vector3 delta = bone.Body.position - bone.StartPosition; delta.y = 0;
+                if (delta.sqrMagnitude > distance) { moved = bone; distance = delta.sqrMagnitude; }
+            }
+            // 核对脚底投影，不能拿未来落点或抬脚产生的离地高度代替越沿。
+            bool overlaps = false;
+            foreach (var platform in arena.Platforms)
+            {
+                var x = moved.Collider.bounds; var p = platform.bounds;
+                overlaps |= x.max.y >= p.max.y - 0.025f && x.min.x < p.max.x && x.max.x > p.min.x && x.min.z < p.max.z && x.max.z > p.min.z;
+            }
+            Assert.IsFalse(overlaps, "Falling切换时实际迈步脚仍覆盖台面，不能预先撤去支撑");
+        }
+        [Test] public void SideWallContactCannotBeUsedAsFootSupport()
+        {
+            var arena = PrepareLowArena();
+            var probe = GameObject.CreatePrimitive(PrimitiveType.Cube); SceneManager.MoveGameObjectToScene(probe, scene);
+            probe.transform.localScale = Vector3.one * 0.08f;
+            probe.transform.position = new Vector3(arena.Platforms[0].bounds.max.x + 0.02f, -0.25f, a.transform.position.z);
+            var body = probe.AddComponent<Rigidbody>(); body.useGravity = false;
+            var sensor = probe.AddComponent<PhysicalContact>(); sensor.Owner = a; sensor.Region = ContactRegion.Leg;
+            Physics.SyncTransforms(); scene.GetPhysicsScene().Simulate(0.01f);
+            Assert.IsTrue(sensor.TouchesEnvironment(arena.Platforms[0]), "确认真实侧壁碰撞已发生");
+            Assert.IsFalse(arena.HasPlatformContact(sensor), "碰到台侧面不能伪报落脚支撑");
+        }
+        [Test] public void ProtectiveStepPreservesTheCommittedTorsoPoseBeforeLanding()
+        {
+            PrepareLowArena(); var match = CreateMatch();
+            for (int i = 0; i < 350 && match.Round.Phase == RoundPhase.Fighting; i++)
+            { match.Tick(new PlayerIntent { Lean = Vector2.up }, default, false, false, false, false, 0.01f); scene.GetPhysicsScene().Simulate(0.01f); }
+            Assert.IsTrue(a.Stepping);
+            PhysicalBone chest = null;
+            foreach (var bone in a.Bones) if (bone.Name == "UpperThorax") chest = bone;
+            Quaternion before = chest.GoalRotation;
+            Assert.Greater(Quaternion.Angle(before, chest.StartRotation), 1f, "确认失衡时身体有实际倾斜目标");
+            match.Tick(default, default, false, false, false, false, 0.01f);
+            Assert.Less(Quaternion.Angle(before, chest.GoalRotation), 0.5f, "保护步不能一帧切回开局直立目标，将失衡动作强行拉回");
+        }
+        [Test] public void MissingLandingSurfacesHasAnExplicitRestartFallbackWithoutInventingLanding()
+        {
+            var arena = PrepareLowArena(); arena.LandingGround.enabled = false;
+            var match = CreateMatch(); var lean = new PlayerIntent { Lean = Vector2.up };
+            for (int i = 0; i < 350 && match.Round.Phase == RoundPhase.Fighting; i++)
+            { match.Tick(lean, default, false, false, false, false, 0.01f); scene.GetPhysicsScene().Simulate(0.01f); }
+            Assert.AreEqual(RoundResult.PlayerTwo, match.Round.Result);
+            // 连台面的躯干承托也移除，确保测试的确不存在任何真实落地面。
+            foreach (var platform in arena.Platforms) platform.enabled = false;
+            LogAssert.Expect(LogType.Warning, "玩家1结束动作超时，已开放重开；未将其记为真实落地。");
+            for (int i = 0; i < 850 && !match.CanRestart; i++)
+            { match.Tick(default, default, false, false, false, false, 0.01f); scene.GetPhysicsScene().Simulate(0.01f); }
+            Assert.IsTrue(a.PresentationTimedOut); Assert.IsFalse(a.GroundLanded); Assert.IsTrue(match.CanRestart);
+            Assert.AreEqual(RoundResult.PlayerTwo, match.Round.Result); Assert.AreEqual(1, match.Round.Resolutions);
+        }
+        [TestCase(-1f)] [TestCase(1f)]
+        public void SidewaysStepLeavesTheCorrectSideOfThePlatform(float direction)
+        {
+            PrepareLowArena(); var match = CreateMatch();
+            for (int i = 0; i < 250; i++)
+            { match.Tick(default, default, false, false, false, false, 0.01f); scene.GetPhysicsScene().Simulate(0.01f); }
+            a.Pelvis.AddForce(Vector3.right * direction * 70, ForceMode.Impulse);
+            for (int i = 0; i < 650 && match.Round.Phase == RoundPhase.Fighting; i++)
+            { match.Tick(default, default, false, false, false, false, 0.01f); scene.GetPhysicsScene().Simulate(0.01f); }
+            Assert.AreEqual(RoundResult.PlayerTwo, match.Round.Result);
+            for (int i = 0; i < 850 && !match.CanRestart; i++)
+            {
+                match.Tick(default, default, false, false, false, false, 0.01f); scene.GetPhysicsScene().Simulate(0.01f);
+            }
+            TestContext.WriteLine($"侧向={direction} 位移={a.Pelvis.position.x:F3} 落地={a.GroundLanded} 摔落={a.Falling} 落脚={a.StepLanded}");
+            Assert.IsTrue(a.GroundLanded); Assert.IsFalse(a.PresentationTimedOut);
+            Assert.Greater(a.Pelvis.position.x * direction, 0.12f);
+        }
+        [Test] public void FallingCanPauseResumeAndResetForAnotherPhysicalRound()
+        {
+            PrepareLowArena(); var match = CreateMatch();
+            var pad = UnityEngine.InputSystem.InputSystem.AddDevice<UnityEngine.InputSystem.Gamepad>();
+            var other = UnityEngine.InputSystem.InputSystem.AddDevice<UnityEngine.InputSystem.Gamepad>();
+            try
+            {
+                match.Input.Roster.Join(pad); match.Input.Roster.Join(other);
+                for (int round = 0; round < 2; round++)
+                {
+                    if (round > 0)
+                    {
+                        match.ResetRound(); match.Round.Ready(); match.Round.Start();
+                        match.Tick(default, default, false, false, false, false, 3);
+                    }
+                    for (int i = 0; i < 350 && match.Round.Phase == RoundPhase.Fighting; i++)
+                    { match.Tick(new PlayerIntent { Lean = Vector2.up }, default, false, false, false, false, 0.01f); scene.GetPhysicsScene().Simulate(0.01f); }
+                    for (int i = 0; i < 80 && !a.Falling; i++)
+                    { match.Tick(default, default, false, false, false, false, 0.01f); scene.GetPhysicsScene().Simulate(0.01f); }
+                    Assert.IsTrue(a.Falling);
+                    match.Freeze("测试摔落暂停"); Vector3 position = a.Pelvis.position; float time = match.ResultSeconds;
+                    for (int i = 0; i < 50; i++)
+                    { match.Tick(default, default, false, false, false, false, 0.01f); scene.GetPhysicsScene().Simulate(0.01f); }
+                    Assert.AreEqual(position, a.Pelvis.position); Assert.AreEqual(time, match.ResultSeconds);
+                    UnityEngine.InputSystem.InputSystem.QueueStateEvent(pad,
+                        new UnityEngine.InputSystem.LowLevel.GamepadState().WithButton(UnityEngine.InputSystem.LowLevel.GamepadButton.Start));
+                    UnityEngine.InputSystem.InputSystem.Update(); match.ExternalSimulation = false; match.SendMessage("Update"); match.ExternalSimulation = true;
+                    Assert.IsFalse(match.ResultPaused);
+                    UnityEngine.InputSystem.InputSystem.QueueStateEvent(pad, new UnityEngine.InputSystem.LowLevel.GamepadState());
+                    UnityEngine.InputSystem.InputSystem.Update();
+                    for (int i = 0; i < 850 && !match.CanRestart; i++)
+                    { match.Tick(default, default, false, false, false, false, 0.01f); scene.GetPhysicsScene().Simulate(0.01f); }
+                    Assert.IsTrue(a.GroundLanded); Assert.IsFalse(a.PresentationTimedOut);
+                    Assert.IsTrue(match.CanRestart); Assert.AreEqual(1, match.Round.Resolutions);
+                }
+            }
+            finally
+            {
+                UnityEngine.InputSystem.InputSystem.RemoveDevice(pad); UnityEngine.InputSystem.InputSystem.RemoveDevice(other);
+            }
         }
         private void SimulatePair(PlayerIntent first, PlayerIntent second)
         {

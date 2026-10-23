@@ -33,6 +33,8 @@ MonoBehaviour:
   PassiveRootTorque: 25
   ActiveRootTorque: 100
   LeanTravel: 0.14
+  LeanInputSpeed: 1
+  ExtremeLeanTravel: 0.055
   ActiveBalancePush: 110
   ProtectiveStepDistance: 0.22
   StepLiftHeight: 0.09
@@ -67,7 +69,8 @@ MonoBehaviour:
   PitchLimit: 20
   PadLookSpeed: 85
   MouseSensitivity: 0.1
-  ViewDownDegrees: 8
+  ViewDownDegrees: 20
+  ViewFieldOfView: 86
   ResultDisplaySeconds: 3
   StepRecoverySeconds: 0.9
   FeedbackVolume: 0.6
@@ -77,3 +80,8 @@ MonoBehaviour:
   FeedbackCooldown: 0.18
   CameraKickMeters: 0.012
   CameraKickDegrees: 0.65
+  PlatformSize: {x: 0.46, y: 0.38}
+  PlatformForwardOffset: 0.02
+  PlatformHeight: 0.55
+  FallLandingSeconds: 0.9
+  ResultTimeoutSeconds: 8

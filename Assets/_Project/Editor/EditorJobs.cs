@@ -30,6 +30,10 @@ namespace PushHands.Editor
             nextPoll = EditorApplication.timeSinceStartup + 1;
             if (!File.Exists(Inbox)) return;
             string command = File.ReadAllText(Inbox).Trim();
+            // 用户可能仍停留在试玩模式。测试框架必须在编辑状态启动；保留任务至退出完成。
+            if (EditorApplication.isPlaying && (command == "editmode-red" || command == "editmode-green"
+                || command == "playmode" || command == "physical-tests"))
+            { EditorApplication.isPlaying = false; return; }
             File.Delete(Inbox);
             try
             {
@@ -51,6 +55,7 @@ namespace PushHands.Editor
                 else if (command == "physical-build") { PhysicalBuilder.BuildWindows(); Complete(command, "物理原型 Windows 包已构建"); }
                 else if (command == "physical-handoff") { PhysicalBuilder.Handoff(); Complete(command, "已打开物理试玩场景并捕获检查视图"); }
                 else if (command == "physical-feedback-setup") { PhysicalBuilder.ConfigureFeedback(); Complete(command, "已更新推动反馈参数与展示提示字体"); }
+                else if (command == "physical-arena-setup") { PhysicalBuilder.ConfigureArena(); Complete(command, "已更新独立低台与重心参数"); }
                 else if (command == "resources")
                     Type.GetType("PushHands.Editor.GreyboxBuilder, PushHands.Editor").GetMethod("ImportTextResources").Invoke(null, null);
                 else if (command == "generate" || command == "build")

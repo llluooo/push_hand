@@ -6,6 +6,7 @@ namespace PushHands.Physical
     public sealed class PhysicalFighter : MonoBehaviour
     {
         public PhysicalConfig Config;
+        public PhysicalArena Arena;
         public int PlayerIndex;
         public PhysicalBone[] Bones;
         public Camera ViewCamera;
@@ -16,6 +17,9 @@ namespace PushHands.Physical
         public bool Stepping { get; private set; }
         public bool StepLanded { get; private set; }
         public bool StepPresentationComplete { get; private set; }
+        public bool Falling { get; private set; }
+        public bool GroundLanded { get; private set; }
+        public bool PresentationTimedOut { get; private set; }
         public Vector2 LearningCorrection { get; set; }
         public float[] Effort { get; } = new float[2];
         public Vector3 ActivePushForce { get; private set; }
@@ -23,6 +27,9 @@ namespace PushHands.Physical
         public Vector2 SupportMaximum { get { Cache(); return supportMax; } }
         private PhysicalBone[] palms, forearms, upperArms, thighs, shins, feet, clavicles;
         private PhysicalBone[][] supportChains;
+        private JointDrive[] standingDrives;
+        private Quaternion[] stepPose;
+        private int[] standingLayers;
         private Vector2 look;
         private Vector2 controlLean, bodyTilt, restCenter;
         private Vector3 restGravityTorque;
@@ -31,6 +38,7 @@ namespace PushHands.Physical
         private PhysicalFighter opponent;
         private bool cached;
         private float unstable, stepTime, landingTime;
+        private float fallTime, groundLandingTime;
         private int stepSide = -1;
         private Vector3 stepFrom, stepTo;
         private Vector3 feedbackPosition, feedbackAngles, lastFeedbackWorld;
@@ -92,10 +100,11 @@ namespace PushHands.Physical
             var cameraObject = new GameObject("FirstPersonCamera"); cameraObject.transform.SetParent(root.transform, false);
             fighter.ViewCamera = cameraObject.AddComponent<Camera>();
             fighter.ViewCamera.rect = new Rect(index * 0.5f, 0, 0.5f, 1); fighter.ViewCamera.nearClipPlane = 0.025f;
-            fighter.ViewCamera.fieldOfView = 78; fighter.ViewCamera.farClipPlane = 50;
+            fighter.ViewCamera.fieldOfView = config.ViewFieldOfView; fighter.ViewCamera.farClipPlane = 50;
             // 只排除自己的头与颈；身体、手臂仍可见。沿用原工程的头部专用层。
             fighter.named["Head"].Body.gameObject.layer = 8 + index;
             fighter.named["Neck"].Body.gameObject.layer = 8 + index;
+            for (int i = 0; i < fighter.Bones.Length; i++) fighter.standingLayers[i] = fighter.Bones[i].Body.gameObject.layer;
             fighter.ViewCamera.cullingMask &= ~(1 << (8 + index));
             if (index == 0) cameraObject.AddComponent<AudioListener>();
             fighter.ResetPose(); fighter.RenderView(0);
@@ -145,13 +154,20 @@ namespace PushHands.Physical
             if (cached) return; named.Clear(); foreach (var bone in Bones) named.Add(bone.Name, bone);
             foreach (var bone in Bones)
             {
+                // 这些原生物理属性不会随2022版场景/预制体保存，加载后须恢复创建时的精度。
+                bone.Body.solverIterations = 16; bone.Body.solverVelocityIterations = 8; bone.Body.maxAngularVelocity = 12;
                 bone.GoalRotation = bone.StartRotation;
                 foreach (var candidate in Bones)
                     if (candidate.Body == bone.Joint.connectedBody) { bone.Parent = candidate; break; }
             }
             supportChains = new PhysicalBone[Bones.Length][];
+            standingDrives = new JointDrive[Bones.Length];
+            stepPose = new Quaternion[Bones.Length];
+            standingLayers = new int[Bones.Length];
             for (int i = 0; i < Bones.Length; i++)
             {
+                standingDrives[i] = Bones[i].Joint.slerpDrive;
+                standingLayers[i] = Bones[i].Body.gameObject.layer;
                 var chain = new List<PhysicalBone>();
                 foreach (var candidate in Bones)
                     for (var parent = candidate; parent != null; parent = parent.Parent)
@@ -197,7 +213,8 @@ namespace PushHands.Physical
             Effort[1] = Mathf.MoveTowards(Effort[1], desiredRight, dt * (desiredRight == 0 ? 12 : 3));
             BalanceSample balance = CaptureBalance();
             float response = 1 - Mathf.Exp(-Config.PoseResponse * dt);
-            controlLean = Vector2.Lerp(controlLean, Vector2.ClampMagnitude(intent.Lean, 1), response);
+            // 主动重心靠肌肉逐渐建立；不能把满幅按键当作瞬时全身冲击。
+            controlLean = Vector2.MoveTowards(controlLean, Vector2.ClampMagnitude(intent.Lean, 1), dt * Config.LeanInputSpeed);
             Vector2 lean = controlLean;
             var rootDrive = Bones[0].Joint.slerpDrive;
             rootDrive.maximumForce = Mathf.Lerp(Config.PassiveRootTorque, Config.ActiveRootTorque, lean.magnitude);
@@ -324,20 +341,29 @@ namespace PushHands.Physical
         private void SupportStance(BalanceSample balance, Vector2 lean, float retreat, int liftedSide = -1)
         {
             float mass = 0; foreach (var bone in Bones) mass += bone.Body.mass;
-            float desiredHeight = (Stepping ? 0.89f : 0.94f) - retreat * 0.035f;
+            float desiredHeight = transform.position.y + (Stepping ? 0.89f : 0.94f) - retreat * 0.035f;
             float vertical = Mathf.Clamp(mass * (9.81f + (desiredHeight - Pelvis.position.y) * Config.StandingStiffness
                 - Pelvis.velocity.y * Config.StandingDamping), 0, Config.MaximumStandForce);
             Vector2 desiredCenter = restCenter + lean * Config.LeanTravel + Vector2.up * (Mathf.Max(Effort[0], Effort[1]) * 0.045f - retreat * 0.06f);
+            float extreme = Mathf.InverseLerp(0.85f, 1, lean.magnitude);
+            desiredCenter += lean.normalized * (extreme * extreme * Config.ExtremeLeanTravel);
             // 空闲恢复只消除小扰动；主要防守能力来自玩家主动调整重心。
             float balanceLimit = Mathf.Lerp(Config.PassiveBalanceForce, Config.MaximumBalanceForce, lean.magnitude);
             Vector2 horizontal = Vector2.ClampMagnitude(((desiredCenter - balance.Center) * 18 - balance.Velocity * 6) * mass
                 + lean * Config.ActiveBalancePush, balanceLimit);
+            // 已经提交的保护步应保留失衡动量，不能靠旧站姿辅助把身体拉回开局重心。
+            if (Arena != null && Stepping && !StepLanded) horizontal = Vector2.zero;
             Vector3 force = transform.TransformDirection(new Vector3(horizontal.x, 0, horizontal.y)) + Vector3.up * vertical;
             // 任务空间的站姿肌肉：骨盆与足部之间施加等大反向作用，依赖地面支撑而非悬空抬升。
             // 力量有上限，脚被推动或恢复不及时仍会越界、触发保护步。
+            int supportingFeet = 0;
+            for (int i = 0; i < feet.Length; i++)
+                if (i != liftedSide && (Arena == null || Arena.HasPlatformSupport(feet[i].Body.position))) supportingFeet++;
+            if (supportingFeet == 0) return;
             Pelvis.AddForce(force, ForceMode.Force);
             for (int i = 0; i < feet.Length; i++)
-                if (i != liftedSide) feet[i].Body.AddForce(-force * (liftedSide < 0 ? 0.5f : 1), ForceMode.Force);
+                if (i != liftedSide && (Arena == null || Arena.HasPlatformSupport(feet[i].Body.position)))
+                    feet[i].Body.AddForce(-force / supportingFeet, ForceMode.Force);
         }
         private void ConfigureHinge(PhysicalBone bone, float lower, float upper)
         {
@@ -394,7 +420,7 @@ namespace PushHands.Physical
                 || sample.RequiredSupport.y < supportMin.y || sample.RequiredSupport.y > supportMax.y
                 || sample.Predicted.x < supportMin.x || sample.Predicted.x > supportMax.x
                 || sample.Predicted.y < supportMin.y || sample.Predicted.y > supportMax.y
-                || sample.FootDisplacement > Config.FootStepDistance || Pelvis.position.y < 0.62f;
+                || sample.FootDisplacement > Config.FootStepDistance || Pelvis.position.y - transform.position.y < 0.62f;
             unstable = outside ? unstable + dt : Mathf.Max(0, unstable - dt * 2);
             if (unstable >= Config.StepDelay) Stepping = true;
             return Stepping;
@@ -423,17 +449,36 @@ namespace PushHands.Physical
             if (!Stepping) { Drive(default, false, false, null, dt); return; }
             stepTime += dt;
             Cache();
+            if (Falling) { PresentFall(dt); return; }
             if (stepSide < 0)
             {
-                var risk = CaptureBalance().RequiredSupport;
+                for (int i = 0; i < Bones.Length; i++) stepPose[i] = Bones[i].GoalRotation;
+                var sample = CaptureBalance();
+                var risk = sample.RequiredSupport - restCenter;
+                if ((sample.Predicted - restCenter).sqrMagnitude > risk.sqrMagnitude) risk = sample.Predicted - restCenter;
                 stepSide = Mathf.Abs(risk.x) > Mathf.Abs(risk.y) ? (risk.x < 0 ? 0 : 1) : (risk.y < 0 ? 1 : 0);
                 Vector3 direction = transform.TransformDirection(new Vector3(risk.x, 0, risk.y).normalized);
-                stepFrom = feet[stepSide].Body.position; stepTo = stepFrom + direction * Config.ProtectiveStepDistance;
+                float distance = Config.ProtectiveStepDistance;
+                if (Arena != null)
+                {
+                    // 落脚点预留迈步期间身体按已有速度继续前进的距离，不因平台边缘额外放大步幅。
+                    Vector3 velocity = transform.TransformDirection(new Vector3(sample.Velocity.x, 0, sample.Velocity.y));
+                    distance += Mathf.Min(Config.ProtectiveStepDistance, Mathf.Max(0, Vector3.Dot(velocity, direction)) * Config.StepSeconds);
+                }
+                stepFrom = feet[stepSide].Body.position; stepTo = stepFrom + direction * distance;
                 foreach (var support in feet[stepSide].Body.GetComponents<ConfigurableJoint>())
                     support.xDrive = support.yDrive = support.zDrive = default;
             }
-            foreach (var bone in Bones) SetGoal(bone, bone.StartRotation);
+            for (int i = 0; i < Bones.Length; i++)
+            {
+                if (Arena == null) { SetGoal(Bones[i], Bones[i].StartRotation); continue; }
+                // 保留提交保护步时的身体投入；只有真实落脚后才逐渐恢复直立。
+                if (StepLanded) stepPose[i] = Quaternion.Slerp(stepPose[i], Bones[i].StartRotation, 1 - Mathf.Exp(-4 * dt));
+                SetGoal(Bones[i], stepPose[i]);
+            }
             float progress = Mathf.Clamp01(stepTime / Mathf.Max(0.1f, Config.StepSeconds));
+            if (Arena != null && progress >= 1 && !Arena.HasPlatformBelow(feet[stepSide].Collider))
+            { BeginFall(); PresentFall(dt); return; }
             Vector3 target = Vector3.Lerp(stepFrom, stepTo, Mathf.SmoothStep(0, 1, progress));
             target.y += Mathf.Sin(progress * Mathf.PI) * Config.StepLiftHeight;
             for (int side = 0; side < 2; side++)
@@ -452,7 +497,8 @@ namespace PushHands.Physical
                     + Vector3.up * (progress < 1 ? 110 : 0);
                 lifted.AddForce(Vector3.ClampMagnitude(liftForce, Config.MaximumStepForce), ForceMode.Force);
                 Vector3 error = lifted.position - stepTo; error.y = 0;
-                if (progress >= 1 && error.magnitude < 0.06f && lifted.position.y <= stepFrom.y + 0.035f)
+                if (progress >= 1 && error.magnitude < 0.06f && lifted.position.y <= stepFrom.y + 0.035f
+                    && (Arena == null || Arena.HasPlatformContact(lifted.GetComponent<PhysicalContact>())))
                 {
                     StepLanded = true;
                     landingTime = stepTime;
@@ -467,11 +513,46 @@ namespace PushHands.Physical
             // 落脚后继续恢复身体，不能仅因原来的短计时结束就截断动作。
             if (StepLanded && stepTime - landingTime >= Mathf.Max(0.3f, Config.StepRecoverySeconds))
             { StepPresentationComplete = true; SetFrozen(true); }
+            CheckPresentationTimeout();
+        }
+        private void BeginFall()
+        {
+            Falling = true; fallTime = groundLandingTime = 0;
+            foreach (var foot in feet)
+            {
+                var support = foot.Body.GetComponents<ConfigurableJoint>()[1];
+                support.xDrive = support.yDrive = support.zDrive = default;
+            }
+            // 离台后撤去世界姿态驱动与站姿辅助；身体保留实际速度及关节限位。
+            int hiddenLayer = named["Head"].Body.gameObject.layer;
+            for (int i = 0; i < Bones.Length; i++)
+            {
+                var bone = Bones[i]; standingLayers[i] = bone.Body.gameObject.layer;
+                var drive = bone.Joint.slerpDrive;
+                drive.positionSpring *= 0.08f; drive.positionDamper = 6; drive.maximumForce = bone.Parent == null ? 0 : 12;
+                bone.Joint.slerpDrive = drive;
+                // 倒地后视线保持水平，排除自己的肩胸遮挡；另一玩家仍看见完整身体。
+                bone.Body.gameObject.layer = hiddenLayer;
+            }
+        }
+        private void PresentFall(float dt)
+        {
+            fallTime += dt;
+            if (!GroundLanded && Arena.HasLanded(this)) { GroundLanded = true; groundLandingTime = fallTime; }
+            if (GroundLanded && fallTime - groundLandingTime >= Config.FallLandingSeconds)
+            { StepPresentationComplete = true; SetFrozen(true); }
+            CheckPresentationTimeout();
+        }
+        private void CheckPresentationTimeout()
+        {
+            if (StepPresentationComplete || stepTime < Config.ResultTimeoutSeconds) return;
+            PresentationTimedOut = StepPresentationComplete = true; SetFrozen(true);
+            Debug.LogWarning($"玩家{PlayerIndex + 1}结束动作超时，已开放重开；未将其记为真实落地。");
         }
         public void EndControl()
         {
             Effort[0] = Effort[1] = 0; Technique.Reset(); LearningCorrection = Vector2.zero;
-            controlLean = Vector2.zero; ActivePushForce = activePressureMoment = Vector3.zero; opponent = null;
+            ActivePushForce = activePressureMoment = Vector3.zero; opponent = null;
             handPushForce[0] = handPushForce[1] = 0;
         }
         public void ReadHandLoad(int side, float dt, out bool touching, out float force)
@@ -496,8 +577,10 @@ namespace PushHands.Physical
         public void ResetPose()
         {
             Cache(); SetFrozen(true);
-            foreach (var bone in Bones)
+            for (int i = 0; i < Bones.Length; i++)
             {
+                var bone = Bones[i]; bone.Joint.slerpDrive = standingDrives[i];
+                bone.Body.gameObject.layer = standingLayers[i];
                 bone.Body.position = bone.StartPosition; bone.Body.rotation = bone.StartRotation;
                 bone.SavedVelocity = bone.SavedAngularVelocity = Vector3.zero; bone.Joint.targetRotation = Quaternion.identity;
                 bone.GoalRotation = bone.StartRotation;
@@ -512,12 +595,24 @@ namespace PushHands.Physical
             }
             for (int i = 0; i < 2; i++) { PalmTargets[i] = palms[i].Body.position; Effort[i] = 0; }
             Technique.Reset(); Stepping = StepLanded = StepPresentationComplete = false; unstable = stepTime = landingTime = 0; stepSide = -1; look = Vector2.zero; LearningCorrection = Vector2.zero;
+            Falling = GroundLanded = PresentationTimedOut = false; fallTime = groundLandingTime = 0;
             controlLean = bodyTilt = Vector2.zero; restCenter = CaptureBalance().Center;
             ActivePushForce = Vector3.zero;
-            handPushForce[0] = handPushForce[1] = 0; feedbackPosition = feedbackAngles = Vector3.zero;
+            handPushForce[0] = handPushForce[1] = 0; feedbackPosition = feedbackAngles = lastFeedbackWorld = Vector3.zero;
             activePressureMoment = Vector3.zero; filteredSupportShift = Vector2.zero; opponent = null;
             restGravityTorque = Vector3.zero;
             foreach (var bone in Bones) restGravityTorque += GravityMoment(bone, Pelvis.position);
+        }
+        public void RelocateSpawn(Vector3 position)
+        {
+            Cache(); SetFrozen(true);
+            Vector3 offset = position - transform.position; transform.position = position;
+            foreach (var bone in Bones)
+            {
+                bone.StartPosition += offset;
+                if (bone.Parent == null) bone.Joint.connectedAnchor += offset;
+            }
+            ResetPose(); RenderView(0);
         }
         public void Observe(Vector2 delta)
         { look.x = Mathf.Clamp(look.x + delta.x, -Config.YawLimit, Config.YawLimit); look.y = Mathf.Clamp(look.y - delta.y, -Config.PitchLimit, Config.PitchLimit); }
@@ -525,6 +620,8 @@ namespace PushHands.Physical
         {
             Cache(); if (ViewCamera == null) return;
             Vector3 eye = named["Head"].Body.position + transform.forward * 0.095f - Vector3.up * 0.045f;
+            if (Falling && Arena != null && Arena.LandingGround != null)
+                eye.y = Mathf.Max(eye.y, Arena.LandingGround.bounds.max.y + 0.12f);
             ViewCamera.transform.position = dt <= 0 ? eye : Vector3.Lerp(ViewCamera.transform.position - lastFeedbackWorld, eye, 1 - Mathf.Exp(-18 * dt));
             var balance = CaptureBalance();
             lastFeedbackWorld = transform.TransformDirection(feedbackPosition);

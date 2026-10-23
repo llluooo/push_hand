@@ -13,9 +13,14 @@ namespace PushHands.Physical
         private PhysicalFighter pushOwner;
         private Vector3 pushPoint, pushNormal;
         private readonly System.Collections.Generic.HashSet<Collider> contacts = new System.Collections.Generic.HashSet<Collider>();
+        private readonly System.Collections.Generic.HashSet<Collider> environment = new System.Collections.Generic.HashSet<Collider>();
+        private readonly System.Collections.Generic.HashSet<Collider> supportSurfaces = new System.Collections.Generic.HashSet<Collider>();
         public int Count { get { contacts.RemoveWhere(c => c == null || !c.enabled || !c.gameObject.activeInHierarchy); return contacts.Count; } }
         public void ResetImpulse() { Impulse = ImpulseMoment = Vector3.zero; }
-        public void Clear() { contacts.Clear(); pushCollider = null; ResetImpulse(); }
+        public void Clear() { contacts.Clear(); environment.Clear(); supportSurfaces.Clear(); pushCollider = null; ResetImpulse(); }
+        public bool TouchesEnvironment(Collider surface) => surface != null && surface.enabled
+            && surface.gameObject.activeInHierarchy && environment.Contains(surface);
+        public bool TouchesSupport(Collider surface) => TouchesEnvironment(surface) && supportSurfaces.Contains(surface);
         public bool TryGetPushContact(PhysicalFighter opponent, Vector3 forward, out Rigidbody recipient, out Vector3 point, out Vector3 direction)
         {
             recipient = null; point = pushPoint; direction = -pushNormal;
@@ -26,10 +31,16 @@ namespace PushHands.Physical
         private void OnCollisionEnter(Collision collision) => Register(collision);
         private void OnCollisionStay(Collision collision) => Register(collision);
         private void OnCollisionExit(Collision collision)
-        { contacts.Remove(collision.collider); if (pushCollider == collision.collider) pushCollider = null; }
+        { contacts.Remove(collision.collider); environment.Remove(collision.collider); supportSurfaces.Remove(collision.collider); if (pushCollider == collision.collider) pushCollider = null; }
         private void Register(Collision collision)
         {
             var other = collision.collider.GetComponent<PhysicalContact>();
+            if (other == null)
+            {
+                environment.Add(collision.collider); supportSurfaces.Remove(collision.collider);
+                for (int i = 0; i < collision.contactCount; i++)
+                    if (collision.GetContact(i).normal.y > 0.5f) { supportSurfaces.Add(collision.collider); break; }
+            }
             if (other != null && other.Owner != Owner && ContactRules.IsLegal(Region, other.Region))
             {
                 contacts.Add(collision.collider); Impulse += collision.impulse;
