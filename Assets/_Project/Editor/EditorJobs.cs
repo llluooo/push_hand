@@ -55,6 +55,7 @@ namespace PushHands.Editor
                 else if (command == "physical-build") { PhysicalBuilder.BuildWindows(); Complete(command, "物理原型 Windows 包已构建"); }
                 else if (command == "physical-handoff") { PhysicalBuilder.Handoff(); Complete(command, "已打开物理试玩场景并捕获检查视图"); }
                 else if (command == "physical-feedback-setup") { PhysicalBuilder.ConfigureFeedback(); Complete(command, "已更新推动反馈参数与展示提示字体"); }
+                else if (command == "physical-stance-setup") { PhysicalBuilder.ConfigureParallelStance(); Complete(command, "已更新场景与预制体的开局并排站姿"); }
                 else if (command == "physical-arena-setup") { PhysicalBuilder.ConfigureArena(); Complete(command, "已更新独立低台与重心参数"); }
                 else if (command == "resources")
                     Type.GetType("PushHands.Editor.GreyboxBuilder, PushHands.Editor").GetMethod("ImportTextResources").Invoke(null, null);

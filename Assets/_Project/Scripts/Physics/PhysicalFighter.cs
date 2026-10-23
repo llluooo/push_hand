@@ -36,7 +36,8 @@ namespace PushHands.Physical
         private Vector3 activePressureMoment;
         private Vector2 filteredSupportShift, supportMin, supportMax;
         private PhysicalFighter opponent;
-        private bool cached;
+        // 热重载会保留普通私有字段，但不会保留字典和原生驱动缓存，标记必须同步失效。
+        [System.NonSerialized] private bool cached;
         private float unstable, stepTime, landingTime;
         private float fallTime, groundLandingTime;
         private int stepSide = -1;
@@ -72,7 +73,8 @@ namespace PushHands.Physical
             {
                 string prefix = side == 0 ? "Left" : "Right"; float sign = side == 0 ? -1 : 1;
                 Vector3 hip = new Vector3(sign * 0.13f, 0.93f, 0), knee = new Vector3(sign * 0.15f, 0.53f, 0.065f);
-                Vector3 ankle = new Vector3(sign * 0.15f, 0.13f, side == 0 ? 0.055f : -0.055f);
+                // 并排站姿：前后支撑来自脚掌本身，不通过左右脚错步增加稳定性。
+                Vector3 ankle = new Vector3(sign * 0.15f, 0.13f, 0);
                 var thigh = fighter.AddSegment(bones, prefix + "Thigh", hip, knee, 0.085f, 7, ContactRegion.Leg, pelvis, hip, material, 65);
                 var shin = fighter.AddSegment(bones, prefix + "Shin", knee, ankle, 0.065f, 3, ContactRegion.Leg, thigh, knee, material, 75);
                 fighter.ConfigureHinge(shin, -100, 12);

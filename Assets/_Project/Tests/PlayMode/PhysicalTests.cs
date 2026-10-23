@@ -488,7 +488,7 @@ namespace PushHands.Tests
             }
             finally { Object.DestroyImmediate(firstMaterial); Object.DestroyImmediate(secondMaterial); }
         }
-        [TestCase(0)] [TestCase(1)] public void ActiveWeightShiftDelaysFailureComparedWithIdleGuard(int attackerIndex)
+        [TestCase(0)] [TestCase(1)] public void ActiveWeightShiftImprovesDefenseComparedWithIdleGuard(int attackerIndex)
         {
             var friction = new PhysicMaterial("ActualDefenseFriction") { staticFriction = 0.9f, dynamicFriction = 0.75f,
                 frictionCombine = PhysicMaterialCombine.Average };
@@ -496,29 +496,42 @@ namespace PushHands.Tests
             {
                 foreach (var root in scene.GetRootGameObjects())
                     foreach (var collider in root.GetComponentsInChildren<Collider>()) collider.sharedMaterial = friction;
-                float idle = MeasureDefenseTime(attackerIndex, 0, out bool idleFailed);
-                float active = MeasureDefenseTime(attackerIndex, 0.7f, out _);
+                float idle = MeasureDefenseTime(attackerIndex, 0, out bool idleFailed, out bool idleAttackerFailed);
+                float active = MeasureDefenseTime(attackerIndex, 0.7f, out bool activeFailed, out bool activeAttackerFailed);
                 TestContext.WriteLine($"同样进攻：待机={idle:F2}s，主动调整={active:F2}s");
-                Assert.IsTrue(idleFailed);
-                Assert.Greater(active, idle + 0.4f, "主动调整重心应争取更长反应时间，而非与待机一样");
-                Assert.Greater(active, 1, "不能通过让进攻者立即自败来假装防守有效");
+                Assert.IsTrue(idleFailed); Assert.IsFalse(idleAttackerFailed);
+                // 并排后迎推可通过真实反作用先逼进攻者迈步，不能把提前反制获胜误判为防守变差。
+                bool countered = activeAttackerFailed && !activeFailed;
+                Assert.IsTrue(countered || active > idle + 0.4f,
+                    "主动调整重心应争取反应时间，或在自己未迈步时通过真实接触反制获胜");
+                Assert.Greater(active, config.StepDelay, "应保留实际接触和重心反应过程，不能瞬间结算");
             }
             finally { Object.DestroyImmediate(friction); }
         }
-        private float MeasureDefenseTime(int attackerIndex, float braceAmount, out bool defenderFailed)
+        private float MeasureDefenseTime(int attackerIndex, float braceAmount, out bool defenderFailed, out bool attackerFailed)
         {
             a.ResetPose(); b.ResetPose(); a.SetFrozen(false); b.SetFrozen(false); Physics.SyncTransforms();
             for (int i = 0; i < 300; i++) SimulatePair(default, default);
             var attack = new PlayerIntent { LeftForce = 1, RightForce = 1, Lean = Vector2.up * 0.8f };
             var brace = new PlayerIntent { Lean = Vector2.up * braceAmount };
-            for (int i = 0; i < 100 && braceAmount > 0; i++) SimulatePair(attackerIndex == 0 ? default : brace, attackerIndex == 0 ? brace : default);
+            for (int i = 0; i < 100 && braceAmount > 0; i++)
+            {
+                SimulatePair(attackerIndex == 0 ? default : brace, attackerIndex == 0 ? brace : default);
+                Assert.IsFalse(a.AssessStep(0.01f), "进攻前准备迎推不能让玩家一自行迈步");
+                Assert.IsFalse(b.AssessStep(0.01f), "进攻前准备迎推不能让玩家二自行迈步");
+            }
             var attacker = attackerIndex == 0 ? a : b; var defender = attackerIndex == 0 ? b : a;
-            defenderFailed = false;
+            TestContext.WriteLine($"防守准备：攻击方={attackerIndex} 前倾={braceAmount:F2} 进攻重心={attacker.CaptureBalance().Center:F3} 防守重心={defender.CaptureBalance().Center:F3} 防守预测={defender.CaptureBalance().Predicted:F3}");
+            defenderFailed = attackerFailed = false;
             for (int i = 0; i < 500; i++)
             {
                 SimulatePair(attackerIndex == 0 ? attack : brace, attackerIndex == 0 ? brace : attack);
-                defenderFailed = defender.AssessStep(0.01f); bool attackerFailed = attacker.AssessStep(0.01f);
-                if (defenderFailed || attackerFailed) return (i + 1) * 0.01f;
+                defenderFailed = defender.AssessStep(0.01f); attackerFailed = attacker.AssessStep(0.01f);
+                if (defenderFailed || attackerFailed)
+                {
+                    TestContext.WriteLine($"防守结束：进攻迈步={attackerFailed} 防守迈步={defenderFailed} 进攻重心={attacker.CaptureBalance().Center:F3} 进攻需求={attacker.CaptureBalance().RequiredSupport:F3} 进攻预测={attacker.CaptureBalance().Predicted:F3} 防守重心={defender.CaptureBalance().Center:F3} 防守需求={defender.CaptureBalance().RequiredSupport:F3} 防守预测={defender.CaptureBalance().Predicted:F3}");
+                    return (i + 1) * 0.01f;
+                }
             }
             return 5;
         }

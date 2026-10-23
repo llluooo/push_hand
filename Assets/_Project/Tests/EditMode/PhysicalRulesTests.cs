@@ -5,6 +5,76 @@ namespace PushHands.Tests
 {
     public sealed class PhysicalRulesTests
     {
+        [TestCase(0)] [TestCase(1)]
+        public void GeneratedFighterStartsAndResetsWithParallelFeet(int index)
+        {
+            var config = UnityEngine.ScriptableObject.CreateInstance<PhysicalConfig>();
+            PhysicalFighter fighter = null;
+            try
+            {
+                fighter = PhysicalFighter.Create(index, config, null);
+                AssertParallelStance(fighter);
+            }
+            finally
+            {
+                if (fighter != null) UnityEngine.Object.DestroyImmediate(fighter.gameObject);
+                UnityEngine.Object.DestroyImmediate(config);
+            }
+        }
+        [TestCase(0)] [TestCase(1)]
+        public void SavedFighterStartsAndResetsWithParallelFeet(int index)
+        {
+            var root = UnityEditor.PrefabUtility.LoadPrefabContents($"Assets/_Project/Prefabs/Physical/Fighter{index}.prefab");
+            try { AssertParallelStance(root.GetComponent<PhysicalFighter>()); }
+            finally { UnityEditor.PrefabUtility.UnloadPrefabContents(root); }
+        }
+        [Test] public void PlayableSceneStoresParallelFeetForBothPlayers()
+        {
+            var scene = UnityEditor.SceneManagement.EditorSceneManager.OpenScene(
+                "Assets/_Project/Scenes/PushHandsPhysical.unity", UnityEditor.SceneManagement.OpenSceneMode.Additive);
+            try
+            {
+                int count = 0;
+                foreach (var root in scene.GetRootGameObjects())
+                    foreach (var fighter in root.GetComponentsInChildren<PhysicalFighter>())
+                    { AssertParallelStance(fighter); count++; }
+                Assert.AreEqual(2, count);
+            }
+            finally { UnityEditor.SceneManagement.EditorSceneManager.CloseScene(scene, true); }
+        }
+        private static void AssertParallelStance(PhysicalFighter fighter)
+        {
+            PhysicalBone left = System.Array.Find(fighter.Bones, bone => bone.Name == "LeftFoot");
+            PhysicalBone right = System.Array.Find(fighter.Bones, bone => bone.Name == "RightFoot");
+            var l = fighter.transform.InverseTransformPoint(left.StartPosition);
+            var r = fighter.transform.InverseTransformPoint(right.StartPosition);
+            Assert.That(l.z, Is.EqualTo(r.z).Within(0.0001f), "开局左右脚应在同一前后位置");
+            Assert.That(r.x - l.x, Is.EqualTo(0.30f).Within(0.0001f));
+            Assert.That(fighter.SupportMaximum.y - fighter.SupportMinimum.y, Is.EqualTo(0.26f).Within(0.0001f),
+                "前后支撑范围应等于并排脚掌长度，不能残留错步的额外支撑");
+            foreach (var foot in new[] { left, right })
+            {
+                Assert.That(UnityEngine.Vector3.Distance(foot.Body.transform.position, foot.StartPosition), Is.LessThan(0.0001f),
+                    "保存的可见脚位必须与重开姿态一致");
+                Assert.That(UnityEngine.Quaternion.Angle(foot.StartRotation, fighter.transform.rotation), Is.LessThan(0.001f));
+                var joint = foot.Joint;
+                var anchor = joint.transform.TransformPoint(joint.anchor);
+                var connected = joint.connectedBody.transform.TransformPoint(joint.connectedAnchor);
+                Assert.That(UnityEngine.Vector3.Distance(anchor, connected), Is.LessThan(0.001f), "踝关节两端锚点必须重合");
+                foot.Body.position += fighter.transform.forward * 0.25f;
+            }
+            foreach (var bone in fighter.Bones)
+                if (bone.Name.EndsWith("Shin"))
+                    Assert.That(UnityEngine.Vector3.Dot(bone.Body.transform.TransformDirection(bone.Joint.secondaryAxis), fighter.transform.up),
+                        Is.GreaterThan(0.9999f), "更新腿部姿态后膝关节参考轴也应同步");
+            fighter.ResetPose();
+            foreach (var foot in new[] { left, right })
+            {
+                Assert.That(UnityEngine.Vector3.Distance(foot.Body.position, foot.StartPosition), Is.LessThan(0.0001f));
+                var anchor = foot.Body.GetComponents<UnityEngine.ConfigurableJoint>()[1].connectedAnchor;
+                Assert.That(UnityEngine.Vector3.Distance(anchor, foot.StartPosition), Is.LessThan(0.0001f), "重开足部锚点应与并排脚位一致");
+            }
+        }
         [Test] public void SavedFighterRestoresRuntimePhysicsSolverSettings()
         {
             var root = UnityEditor.PrefabUtility.LoadPrefabContents("Assets/_Project/Prefabs/Physical/Fighter0.prefab");

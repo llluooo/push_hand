@@ -32,11 +32,11 @@ MonoBehaviour:
   PassiveBalanceForce: 35
   PassiveRootTorque: 25
   ActiveRootTorque: 100
-  LeanTravel: 0.14
+  LeanTravel: 0.09
   LeanInputSpeed: 1
   ExtremeLeanTravel: 0.055
-  ActiveBalancePush: 110
-  ProtectiveStepDistance: 0.22
+  ActiveBalancePush: 55
+  ProtectiveStepDistance: 0.275
   StepLiftHeight: 0.09
   StepSeconds: 0.42
   MaximumStepForce: 350

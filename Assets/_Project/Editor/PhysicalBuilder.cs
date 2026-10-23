@@ -14,6 +14,73 @@ namespace PushHands.Editor
     public static class PhysicalBuilder
     {
         public const string ScenePath = "Assets/_Project/Scenes/PushHandsPhysical.unity";
+        [MenuItem("推手/物理人偶/更新开局并排站姿")]
+        public static void ConfigureParallelStance()
+        {
+            if (EditorApplication.isPlaying) throw new InvalidOperationException("请先退出运行模式。");
+            foreach (var loaded in LoadedScenes()) if (loaded.isDirty)
+                throw new InvalidOperationException("当前场景有未保存的修改，未自动覆盖。");
+            var scene = EditorSceneManager.OpenScene(ScenePath);
+            var match = UnityEngine.Object.FindObjectOfType<PhysicalMatch>();
+            if (match == null || match.Fighters == null || match.Fighters.Length != 2)
+                throw new InvalidOperationException("物理场景缺少双人人偶。");
+            // 并排后前后支撑缩短，迁移旧默认倾身幅度，保留用户自定义值。
+            if (Mathf.Approximately(match.Config.LeanTravel, 0.14f)) match.Config.LeanTravel = 0.09f;
+            if (Mathf.Approximately(match.Config.ActiveBalancePush, 110)) match.Config.ActiveBalancePush = 55;
+            // 移除每侧 5.5 厘米错步后，保护步补偿相同几何距离；仍由实际落脚判断支撑。
+            if (Mathf.Approximately(match.Config.ProtectiveStepDistance, 0.22f)) match.Config.ProtectiveStepDistance = 0.275f;
+            EditorUtility.SetDirty(match.Config);
+            for (int i = 0; i < 2; i++)
+            {
+                string path = "Assets/_Project/Prefabs/Physical/Fighter" + i + ".prefab";
+                var root = PrefabUtility.LoadPrefabContents(path);
+                try
+                {
+                    ApplyParallelStance(root.GetComponent<PhysicalFighter>());
+                    PrefabUtility.SaveAsPrefabAsset(root, path);
+                }
+                finally { PrefabUtility.UnloadPrefabContents(root); }
+            }
+            foreach (var fighter in match.Fighters) ApplyParallelStance(fighter);
+            EditorSceneManager.MarkSceneDirty(scene); EditorSceneManager.SaveScene(scene); AssetDatabase.SaveAssets();
+            CompleteArenaInspection(match); CapturePreview(match);
+            Debug.Log("双人并排站姿已更新，保留原场地、上身及资源引用。");
+        }
+        private static void ApplyParallelStance(PhysicalFighter fighter)
+        {
+            if (fighter == null || fighter.Config == null) throw new InvalidOperationException("人偶或参数资源缺失。");
+            // 用同一创建入口取得腿足几何，仅迁移小腿和脚，保留现有身体对象、fileID 与引用。
+            var template = PhysicalFighter.Create(fighter.PlayerIndex, fighter.Config, null);
+            try
+            {
+                foreach (string name in new[] { "LeftShin", "RightShin", "LeftFoot", "RightFoot" })
+                {
+                    var source = Array.Find(template.Bones, bone => bone.Name == name);
+                    var target = Array.Find(fighter.Bones, bone => bone.Name == name);
+                    if (target == null) throw new InvalidOperationException("人偶缺少身体段：" + name);
+                    var local = source.Body.transform;
+                    var body = target.Body;
+                    body.transform.localScale = local.localScale;
+                    // 编辑状态下只写 Rigidbody 位姿不会可靠地写回序列化 Transform。
+                    body.transform.localPosition = local.localPosition;
+                    body.transform.localRotation = local.localRotation;
+                    body.position = body.transform.position; body.rotation = body.transform.rotation;
+                    target.Joint.anchor = source.Joint.anchor;
+                    target.Joint.connectedAnchor = source.Joint.connectedAnchor;
+                    target.Joint.axis = source.Joint.axis;
+                    target.Joint.secondaryAxis = source.Joint.secondaryAxis;
+                    target.StartPosition = body.position; target.StartRotation = body.rotation;
+                    target.StartLocalRotation = Quaternion.Inverse(target.Joint.connectedBody.rotation) * body.rotation;
+                    EditorUtility.SetDirty(body); EditorUtility.SetDirty(body.transform); EditorUtility.SetDirty(target.Joint);
+                }
+                Physics.SyncTransforms(); fighter.ResetPose();
+                foreach (var bone in fighter.Bones)
+                    if (bone.Name.EndsWith("Foot"))
+                        foreach (var joint in bone.Body.GetComponents<ConfigurableJoint>()) EditorUtility.SetDirty(joint);
+                EditorUtility.SetDirty(fighter);
+            }
+            finally { UnityEngine.Object.DestroyImmediate(template.gameObject); }
+        }
         [MenuItem("推手/物理人偶/更新独立低台与重心参数")]
         public static void ConfigureArena()
         {

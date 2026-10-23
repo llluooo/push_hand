@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory=$true)]
-    [ValidateSet('baseline','editmode-red','editmode-green','playmode','physical-tests','install','configure','generate','build','refresh','resources','physical-generate','physical-build','physical-handoff','physical-feedback-setup','physical-arena-setup')]
+    [ValidateSet('baseline','editmode-red','editmode-green','playmode','physical-tests','install','configure','generate','build','refresh','resources','physical-generate','physical-build','physical-handoff','physical-feedback-setup','physical-arena-setup','physical-stance-setup')]
     [string]$Job,
     [int]$TimeoutSeconds = 300
 )

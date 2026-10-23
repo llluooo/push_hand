@@ -17,11 +17,11 @@ namespace PushHands.Physical
         public float FootSpring = 1600, FootDamper = 100, FootForce = 220, FootTorque = 100;
         public float MaximumStandForce = 1150, MaximumBalanceForce = 160;
         public float PassiveBalanceForce = 35, PassiveRootTorque = 25, ActiveRootTorque = 100;
-        public float LeanTravel = 0.14f;
+        public float LeanTravel = 0.09f;
         public float LeanInputSpeed = 1.0f;
         public float ExtremeLeanTravel = 0.055f;
-        public float ActiveBalancePush = 110;
-        public float ProtectiveStepDistance = 0.22f, StepLiftHeight = 0.09f, StepSeconds = 0.42f, MaximumStepForce = 350;
+        public float ActiveBalancePush = 55;
+        public float ProtectiveStepDistance = 0.275f, StepLiftHeight = 0.09f, StepSeconds = 0.42f, MaximumStepForce = 350;
         public float StandingStiffness = 80, StandingDamping = 18;
         [Header("重心与伸手")]
         public float LeanDegrees = 11, EffortDegrees = 8, RecoveryGain = 48, RecoveryDamping = 10;
